@@ -35,14 +35,11 @@ class Settings(BaseSettings):
     rate_limit_window: int = 86400  # window in seconds (24 hours)
     
     # CORS — set in prod (e.g. PROSODYAI_CORS_ORIGINS=https://prosodyai.app,https://www.prosodyai.app)
-    cors_origins: list[str] = ["*"]
+    cors_origins: str = "*"
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v: Union[str, list]) -> list[str]:
-        if isinstance(v, str):
-            return [o.strip() for o in v.split(",") if o.strip()]
-        return v if isinstance(v, list) else ["*"]
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     # Model inference (Baseten under the hood; env vars are ProsodyAI-only)
     service_timeout: float = 60.0
