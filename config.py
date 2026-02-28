@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     temp_dir: str = "/tmp/prosodyai"
     max_file_size: int = 50 * 1024 * 1024  # 50MB
     gcs_bucket: Optional[str] = None  # For large file uploads
+    org_bucket: str = "prosodyai-org-data"  # PROSODYAI_ORG_BUCKET — default bucket for org audio/transcripts
     
     # Redis (for rate limiting in production)
     redis_url: Optional[str] = None
@@ -72,6 +73,7 @@ class Settings(BaseSettings):
     class Config:
         env_prefix = "PROSODYAI_"
         env_file = ".env"
+        extra = "ignore"
 
 
 @lru_cache()

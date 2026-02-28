@@ -26,6 +26,7 @@ from config import settings
 from db import create_session
 from model_client import get_model_client, ModelPrediction
 from kpis import get_kpi_loader
+from storage import get_org_slug, upload_audio, upload_transcript
 from kpi_predictor import get_kpi_predictor, ProsodySignals
 from schemas import (
     AnalysisResponse,
@@ -71,6 +72,29 @@ async def _resolve_session_id(
     if not org_id:
         return None
     return await create_session(org_id, metadata=None)
+
+
+def _store_org_data(
+    api_key_hash: str | None,
+    session_id: str | None,
+    audio_bytes: bytes | None,
+    response_dict: dict,
+):
+    """Background task: upload audio + transcript to the org's GCS folder."""
+    if not api_key_hash or not session_id:
+        return
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        org_slug, org_bucket = loop.run_until_complete(get_org_slug(api_key_hash))
+        loop.close()
+    except Exception:
+        return
+    if not org_slug:
+        return
+    if audio_bytes:
+        upload_audio(org_slug, session_id, audio_bytes, org_storage_bucket=org_bucket)
+    upload_transcript(org_slug, session_id, response_dict, org_storage_bucket=org_bucket)
 
 
 def _log_prediction(
@@ -256,7 +280,6 @@ async def analyze_audio_file(
             prediction, prediction_id, api_key_hash, session_id,
         )
 
-        # Log prediction asynchronously
         background_tasks.add_task(
             _log_prediction,
             prediction_id=prediction_id,
@@ -265,6 +288,14 @@ async def analyze_audio_file(
             prosody_signals=response.prosody.model_dump(),
             kpi_predictions=[p.model_dump() for p in response.kpi_predictions] if response.kpi_predictions else None,
             api_key_hash=api_key_hash,
+        )
+
+        background_tasks.add_task(
+            _store_org_data,
+            api_key_hash=api_key_hash,
+            session_id=session_id,
+            audio_bytes=content,
+            response_dict=response.model_dump(),
         )
 
         return response
@@ -335,6 +366,14 @@ async def analyze_base64_audio(
             prosody_signals=response.prosody.model_dump(),
             kpi_predictions=[p.model_dump() for p in response.kpi_predictions] if response.kpi_predictions else None,
             api_key_hash=api_key_hash,
+        )
+
+        background_tasks.add_task(
+            _store_org_data,
+            api_key_hash=api_key_hash,
+            session_id=session_id,
+            audio_bytes=audio_bytes,
+            response_dict=response.model_dump(),
         )
 
         return response

@@ -1,16 +1,14 @@
 """
-WebSocket endpoint for real-time prosodic feedback and KPI prediction.
+WebSocket endpoint for real-time ProsodySSM inference.
 
-Receives PCM audio from SDK, runs frame extraction in-process, and sends
-accumulated audio to Baseten for real inference. Directives use model
-valence/arousal/emotion so the SDK gets production inference.
+Audio in (PCM) -> model inference -> directives out (VAD, emotion, KPIs).
 """
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
+import time
 import uuid
 from typing import Optional
 
@@ -22,166 +20,152 @@ from db import create_session
 from middleware.auth import validate_api_key
 from kpis import get_kpi_loader, KPIDefinition
 from kpi_predictor import get_kpi_predictor, ProsodySignals
+from storage import upload_audio, upload_transcript, get_org_slug
+from streaming.pipeline import get_pipeline
+from streaming.session import InMemorySessionStore, SessionState
 
 logger = logging.getLogger(__name__)
 
-# 1 second at 16 kHz mono int16
-STREAMING_INFERENCE_CHUNK_BYTES = 16000 * 2
 STREAMING_SAMPLE_RATE = 16000
-INFERENCE_TIMEOUT_SEC = 10.0
-
-
-def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = STREAMING_SAMPLE_RATE) -> bytes:
-    """Wrap raw PCM int16 mono in a WAV header so Baseten model (soundfile) can read it."""
-    import struct
-    n = len(pcm)
-    # WAV header: riff, size, wave, fmt chunk, data chunk
-    fmt = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36 + n,
-        b"WAVE",
-        b"fmt ",
-        16,  # fmt chunk size
-        1,   # PCM
-        1,   # mono
-        sample_rate,
-        sample_rate * 2,
-        2,   # block align
-        16,  # bits per sample
-        b"data",
-        n,
-    )
-    return fmt + pcm
-
-# Lazy-load pipeline components
-_pipeline = None
-_bus = None
-_store = None
-
-
-def _get_pipeline():
-    """Lazy-initialize the ProsodicPipeline singleton (heuristic mode, no model)."""
-    global _pipeline, _bus, _store
-
-    if _pipeline is not None:
-        return _pipeline, _bus, _store
-
-    from streaming.bus import WebSocketAudioBus
-    from streaming.session import InMemorySessionStore
-    from streaming.pipeline import ProsodicPipeline
-
-    _bus = WebSocketAudioBus()
-    _store = InMemorySessionStore()
-    _pipeline = ProsodicPipeline(
-        model=None,  # Heuristic mode; inference via Baseten for analysis, not streaming
-        predictor=None,
-        bus=_bus,
-        store=_store,
-    )
-    return _pipeline, _bus, _store
-
 
 router = APIRouter()
 
+# Session store singleton
+_store: Optional[InMemorySessionStore] = None
+
+
+def _get_store() -> InMemorySessionStore:
+    global _store
+    if _store is None:
+        _store = InMemorySessionStore()
+    return _store
+
+
+# Observer registry
+_observers: dict[str, list[WebSocket]] = {}
+
+
+def _add_observer(session_id: str, ws: WebSocket):
+    _observers.setdefault(session_id, []).append(ws)
+
+
+def _remove_observer(session_id: str, ws: WebSocket):
+    if session_id in _observers:
+        _observers[session_id] = [w for w in _observers[session_id] if w is not ws]
+        if not _observers[session_id]:
+            del _observers[session_id]
+
+
+async def _broadcast(session_id: str, data: dict):
+    if session_id not in _observers:
+        return
+    dead = []
+    for ws in _observers[session_id]:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _remove_observer(session_id, ws)
+
+
+def _flush_to_gcs(org_slug, org_bucket, session_id, pipeline):
+    """Store session audio + transcript to GCS."""
+    if not org_slug:
+        return
+    audio = pipeline.get_all_audio(session_id)
+    history = pipeline.get_prosody_history(session_id)
+    if not audio:
+        return
+    try:
+        from streaming.pipeline import _pcm_to_wav
+        wav = _pcm_to_wav(audio)
+        upload_audio(org_slug, session_id, wav, org_storage_bucket=org_bucket)
+
+        session = pipeline.get_session(session_id)
+        transcript = {
+            "session_id": session_id,
+            "frames": len(history),
+            "duration_seconds": round(len(audio) / (STREAMING_SAMPLE_RATE * 2), 1),
+            "prosody_summary": {
+                "avg_valence": round(sum(s.valence for s in history) / len(history), 3) if history else 0,
+                "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3) if history else 0,
+                "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3) if history else 0,
+            },
+        }
+        if session and session.last_directive:
+            transcript["last_emotion"] = session.last_directive.emotion
+            transcript["last_confidence"] = session.last_directive.confidence
+            transcript["text"] = session.last_directive.text
+
+        upload_transcript(org_slug, session_id, transcript, org_storage_bucket=org_bucket)
+        logger.info(f"Session {session_id}: flushed to GCS ({org_slug})")
+    except Exception as e:
+        logger.error(f"Session {session_id}: GCS flush failed: {e}")
+
 
 class StreamConfig(BaseModel):
-    """Configuration sent by client at session start."""
     session_id: Optional[str] = None
     sample_rate: int = 16000
-    directive_interval_ms: int = 200
 
 
-def _hash_api_key(api_key: str) -> str:
+def _hash_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
 @router.websocket("/realtime")
 async def websocket_realtime(websocket: WebSocket):
-    """
-    Real-time prosodic feedback loop via WebSocket.
-
-    Protocol:
-    1. Client connects and sends config JSON:
-       {"type": "config", "session_id": "...", "sample_rate": 16000, "api_key": "..."}
-
-    2. Client sends audio as binary (raw PCM int16, mono) or JSON:
-       {"type": "audio", "audio": "<base64_pcm>"}
-
-    3. Server pushes directives as JSON:
-       {
-         "type": "directive",
-         "prosody": {"valence": -0.3, "arousal": 0.7, ...},
-         "kpi_predictions": [...],
-         "alerts": [...],
-         "recommended_actions": [...]
-       }
-
-    4. Client sends end signal:
-       {"type": "end"}
-    """
     await websocket.accept()
 
     session_id = str(uuid.uuid4())
-    pipeline, bus, store = _get_pipeline()
+    store = _get_store()
+    pipeline = get_pipeline()
 
-    from streaming.adapters.websocket import WebSocketAdapter
-    adapter = WebSocketAdapter(bus)
-
-    config = StreamConfig()
     api_key_hash: Optional[str] = None
     client_kpis: list[KPIDefinition] = []
-    prosody_history: list[ProsodySignals] = []
-
-    # Per-session: accumulate PCM for Baseten inference; use latest prediction in directives (SDK gets real model output)
-    audio_buffer: bytearray = bytearray()
-    latest_inference = None  # ModelPrediction when we have one
+    org_slug: Optional[str] = None
+    org_bucket: Optional[str] = None
 
     try:
         while True:
             try:
-                data = await asyncio.wait_for(
-                    websocket.receive(), timeout=30.0
-                )
+                data = await asyncio.wait_for(websocket.receive(), timeout=30.0)
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "keepalive"})
                 continue
 
-            # Handle text messages (config, end)
+            
+
             if "text" in data:
                 msg = json.loads(data["text"])
                 msg_type = msg.get("type", "")
 
                 if msg_type == "config":
-                    config = StreamConfig(**{k: v for k, v in msg.items() if k != "type" and k != "api_key"})
-                    if config.session_id:
-                        session_id = config.session_id
+                    if msg.get("session_id"):
+                        session_id = msg["session_id"]
 
-                    # Auth
                     api_key = msg.get("api_key", "")
                     if api_key:
                         try:
                             validate_api_key(api_key)
-                            api_key_hash = _hash_api_key(api_key)
-
-                            # Load client KPIs and create DB session for this stream
+                            api_key_hash = _hash_key(api_key)
                             try:
                                 loader = get_kpi_loader()
                                 client_kpis = await loader.get_kpis_for_api_key(api_key_hash)
                                 org_id = await loader.get_organization_id(api_key_hash)
                                 if org_id:
-                                    db_session_id = await create_session(org_id, metadata=None)
-                                    if db_session_id:
-                                        session_id = db_session_id
-                                logger.info(f"Session {session_id}: loaded {len(client_kpis)} KPIs")
+                                    db_sid = await create_session(org_id)
+                                    if db_sid:
+                                        session_id = db_sid
+                                result = await get_org_slug(api_key_hash)
+                                if result and result[0]:
+                                    org_slug, org_bucket = result
+                                ss = SessionState(session_id=session_id, org_id=org_id, org_slug=org_slug)
+                                await store.set(ss)
                             except Exception as e:
-                                logger.warning(f"Failed to load KPIs for session {session_id}: {e}")
-
+                                logger.warning(f"Session {session_id}: KPI/org load failed: {e}")
                         except Exception:
-                            await websocket.send_json({
-                                "type": "error",
-                                "message": "Invalid API key",
-                            })
+                            await websocket.send_json({"type": "error", "message": "Invalid API key"})
                             await websocket.close(code=4001)
                             return
 
@@ -193,144 +177,152 @@ async def websocket_realtime(websocket: WebSocket):
                     continue
 
                 elif msg_type == "end":
-                    await adapter.close_session(session_id)
+                    _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
+                    session = pipeline.get_session(session_id)
                     await websocket.send_json({
                         "type": "session_end",
                         "session_id": session_id,
-                        "frames_processed": len(prosody_history),
+                        "frames_processed": session.frames_processed if session else 0,
                     })
                     break
 
-                elif msg_type == "audio":
-                    await adapter.handle_message(session_id, data["text"])
+            else:
+                raw = data.get("bytes") or data.get("data")
+                if raw:
+                    directive = await pipeline.process_audio(session_id, raw)
+                else:
+                    continue
+                if directive is None:
                     continue
 
-            # Handle binary messages (raw PCM) — SDK sends this; we run Baseten inference when we have enough audio
-            elif "bytes" in data and data["bytes"]:
-                pcm_data = data["bytes"]
-                audio_buffer.extend(pcm_data)
+                ss = await store.get(session_id)
+                if ss:
+                    ss.last_emotion = directive.emotion
+                    ss.last_text = directive.text
+                    ss.frames_processed = directive.frames_processed
+                    await store.set(ss)
 
-                # When we have ~1s of audio, call Baseten for real inference (same endpoint as analysis)
-                if len(audio_buffer) >= STREAMING_INFERENCE_CHUNK_BYTES and settings.model_id and settings.model_api_key:
-                    chunk = bytes(audio_buffer[:STREAMING_INFERENCE_CHUNK_BYTES])
-                    audio_buffer = audio_buffer[STREAMING_INFERENCE_CHUNK_BYTES:]
-                    try:
-                        from model_client import get_model_client
-                        client = get_model_client()
-                        wav_bytes = _pcm_to_wav_bytes(chunk)
-                        b64 = base64.b64encode(wav_bytes).decode("utf-8")
-                        pred = await asyncio.wait_for(
-                            client.predict_from_base64(b64, language="en"),
-                            timeout=INFERENCE_TIMEOUT_SEC,
-                        )
-                        latest_inference = pred
-                    except Exception as e:
-                        logger.debug("Streaming inference failed (using heuristic): %s", e)
+                response = {
+                    "type": "directive",
+                    "session_id": session_id,
+                    "prosody": {
+                        "valence": round(directive.valence, 3),
+                        "arousal": round(directive.arousal, 3),
+                        "dominance": round(directive.dominance, 3),
+                    },
+                    "emotion": directive.emotion,
+                    "confidence": round(directive.confidence, 3),
+                    "text": directive.text,
+                    "frames_processed": directive.frames_processed,
+                    "timestamp_ms": directive.timestamp_ms,
+                }
 
-                output = await pipeline.process_frame(session_id, pcm_data)
+                if client_kpis:
+                    signals = ProsodySignals(valence=directive.valence, arousal=directive.arousal, dominance=directive.dominance)
+                    history = pipeline.get_prosody_history(session_id)
+                    preds = get_kpi_predictor().predict(signals, client_kpis, history)
+                    response["kpi_predictions"] = [p.to_dict() for p in preds]
+                    alerts = [{"kpi_name": p.alert.kpi_name, "message": p.alert.message} for p in preds if p.alert]
+                    if alerts:
+                        response["alerts"] = alerts
+                    actions = [{"kpi": p.kpi_name, "action": a.action, "expected_impact": round(a.expected_impact, 3)} for p in preds for a in p.recommended_actions]
+                    if actions:
+                        response["recommended_actions"] = actions
 
-                if output is not None:
-                    directive = output.directive
-
-                    # Use Baseten inference when we have it so SDK gets real model output
-                    if latest_inference is not None:
-                        valence = latest_inference.valence
-                        arousal = latest_inference.arousal
-                        dominance = latest_inference.dominance
-                        confidence = latest_inference.confidence
-                        emotion = latest_inference.emotion
-                    else:
-                        valence = directive.valence
-                        arousal = directive.arousal
-                        dominance = getattr(directive, "dominance", 0.5)
-                        confidence = directive.confidence
-                        emotion = getattr(directive, "current_emotion", "neutral")
-
-                    signals = ProsodySignals(
-                        valence=valence,
-                        arousal=arousal,
-                        dominance=dominance,
-                    )
-                    prosody_history.append(signals)
-
-                    response_data = {
-                        "type": "directive",
-                        "session_id": session_id,
-                        "prosody": {
-                            "valence": round(valence, 3),
-                            "arousal": round(arousal, 3),
-                            "dominance": round(dominance, 3),
-                        },
-                        "tts_speed": directive.tts_speed,
-                        "confidence": round(confidence, 3),
-                        "frames_processed": directive.frames_processed,
-                        "timestamp_ms": directive.timestamp_ms,
-                    }
-                    if latest_inference is not None:
-                        response_data["emotion"] = emotion
-
-                    # KPI predictions
-                    if client_kpis:
-                        predictor = get_kpi_predictor()
-                        kpi_preds = predictor.predict(
-                            signals, client_kpis, prosody_history,
-                        )
-
-                        response_data["kpi_predictions"] = [
-                            p.to_dict() for p in kpi_preds
-                        ]
-
-                        # Collect alerts
-                        alerts = [
-                            {
-                                "kpi_name": p.alert.kpi_name,
-                                "message": p.alert.message,
-                            }
-                            for p in kpi_preds
-                            if p.alert is not None
-                        ]
-                        if alerts:
-                            response_data["alerts"] = alerts
-
-                        # Collect recommended actions across all KPIs
-                        all_actions = []
-                        for p in kpi_preds:
-                            for a in p.recommended_actions:
-                                all_actions.append({
-                                    "kpi": p.kpi_name,
-                                    "action": a.action,
-                                    "expected_impact": round(a.expected_impact, 3),
-                                })
-                        if all_actions:
-                            response_data["recommended_actions"] = all_actions
-
-                    # LLM context (prosody-based, not emotion-based)
-                    if hasattr(directive, "llm_context") and directive.llm_context:
-                        response_data["llm_context"] = directive.llm_context
-
-                    await websocket.send_json(response_data)
+                await websocket.send_json(response)
+                await _broadcast(session_id, response)
 
     except WebSocketDisconnect:
         logger.info(f"Session {session_id} disconnected")
+        _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
     except Exception as e:
         logger.error(f"Session {session_id} error: {e}", exc_info=True)
         try:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e),
-            })
+            await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
     finally:
         await pipeline.close_session(session_id)
+        await store.delete(session_id)
 
 
 @router.get("/health")
 async def streaming_health():
-    """Health check for streaming endpoint."""
-    _, _, store = _get_pipeline()
-    active = await store.active_count()
+    store = _get_store()
+    return {"status": "healthy", "active_sessions": await store.active_count()}
+
+
+@router.get("/sessions")
+async def list_active_sessions(org_id: Optional[str] = None):
+    store = _get_store()
+    sessions = await store.list_by_org(org_id) if org_id else await store.list_all()
     return {
-        "status": "healthy",
-        "active_sessions": active,
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "org_id": s.org_id,
+                "org_slug": s.org_slug,
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+                "frames_processed": s.frames_processed,
+                "last_emotion": s.last_emotion,
+                "last_text": s.last_text,
+                "duration_seconds": round(time.time() - s.created_at, 1),
+            }
+            for s in sessions
+        ],
     }
+
+
+@router.websocket("/observe/{session_id}")
+async def observe_session(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    _add_observer(session_id, websocket)
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive(), timeout=60.0)
+                if "text" in data:
+                    msg = json.loads(data["text"])
+                    if msg.get("type") == "ping":
+                        await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "keepalive"})
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _remove_observer(session_id, websocket)
+
+
+@router.get("/history/{org_slug}")
+async def list_session_history(org_slug: str, limit: int = 50):
+    try:
+        from google.cloud import storage as gcs_storage
+        client = gcs_storage.Client()
+        bucket = client.bucket(settings.org_bucket)
+        blobs = list(bucket.list_blobs(prefix=f"{org_slug}/transcripts/", max_results=limit))
+        return {
+            "sessions": [
+                {
+                    "session_id": b.name.split("/")[-1].replace(".json", ""),
+                    "stored_at": b.updated.isoformat() if b.updated else None,
+                    "size_bytes": b.size,
+                }
+                for b in sorted(blobs, key=lambda b: b.updated or 0, reverse=True)
+            ]
+        }
+    except Exception as e:
+        return {"sessions": [], "error": str(e)}
+
+
+@router.get("/history/{org_slug}/{session_id}")
+async def get_session_transcript(org_slug: str, session_id: str):
+    try:
+        from google.cloud import storage as gcs_storage
+        client = gcs_storage.Client()
+        blob = client.bucket(settings.org_bucket).blob(f"{org_slug}/transcripts/{session_id}.json")
+        if not blob.exists():
+            return {"error": "Not found"}
+        return json.loads(blob.download_as_text())
+    except Exception as e:
+        return {"error": str(e)}

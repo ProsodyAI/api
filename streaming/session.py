@@ -20,10 +20,15 @@ class SessionState:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
+    org_id: Optional[str] = None
+    org_slug: Optional[str] = None
+
     ssm_state: Optional[dict] = None
     predictor_state: Optional[Any] = None
     prosody_history: list = field(default_factory=list)
     last_predictions: Optional[dict] = None
+    last_emotion: Optional[str] = None
+    last_text: Optional[str] = None
     frames_processed: int = 0
     source: str = "unknown"
     vertical: Optional[str] = None
@@ -84,3 +89,9 @@ class InMemorySessionStore(SessionStore):
 
     async def active_count(self) -> int:
         return len(self._sessions)
+
+    async def list_by_org(self, org_id: str) -> list[SessionState]:
+        return [s for s in self._sessions.values() if s.org_id == org_id]
+
+    async def list_all(self) -> list[SessionState]:
+        return list(self._sessions.values())
