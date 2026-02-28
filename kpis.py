@@ -141,7 +141,8 @@ class KPILoader:
     """
 
     def __init__(self, database_url: Optional[str] = None) -> None:
-        self._database_url = database_url or os.getenv(
+        from config import settings
+        self._database_url = database_url or settings.database_url or os.getenv(
             "DATABASE_URL",
             os.getenv("PROSODYAI_DATABASE_URL", ""),
         )

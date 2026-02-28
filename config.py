@@ -2,15 +2,20 @@
 API configuration settings.
 """
 
+import os
 from functools import lru_cache
 from typing import Optional, Union
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     """API configuration settings loaded from environment."""
-    
+
+    # Database — same as website. Use DIRECT_DATABASE_URL (direct Postgres) when set, else DATABASE_URL.
+    database_url: Optional[str] = Field(default=None, validation_alias="DATABASE_URL")
+    direct_database_url: Optional[str] = Field(default=None, validation_alias="DIRECT_DATABASE_URL")
+
     # Server settings
     host: str = "0.0.0.0"
     port: int = 8080  # Cloud Run default

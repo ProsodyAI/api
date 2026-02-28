@@ -32,6 +32,20 @@ export PROSODYAI_MODEL_API_KEY=your-model-api-key
 uvicorn main:app --reload --port 8000
 ```
 
+### Cloud Run (Cloud Build trigger)
+
+The image is deployed by a **Cloud Build trigger**. Env vars are set in the deploy step in `cloudbuild.yaml` from **substitution variables**. So you must set them on the trigger, not in the Cloud Run UI (the trigger overwrites the service on each run).
+
+1. In GCP: **Cloud Build** → **Triggers** → your API trigger → **Edit**.
+2. Open **Substitution variables**.
+3. Add (mark secret ones as "Secret" so they’re encrypted):
+   - `_DATABASE_URL` (secret)
+   - `_MODEL_ID`
+   - `_MODEL_API_KEY` (secret)
+   - `_CORS_ORIGINS` (default in yaml: `https://prosodyai.app,https://www.prosodyai.app`)
+   - `_ADMIN_API_KEY` (optional, secret)
+4. Save. The next deploy (or a manual run of the trigger) will set these on the Cloud Run service.
+
 ### Inference backend
 
 - **Model inference** (when credentials are set): Set `PROSODYAI_MODEL_ID` and `PROSODYAI_MODEL_API_KEY`. The API calls the inference backend (Baseten under the hood).

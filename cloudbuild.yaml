@@ -1,8 +1,16 @@
-# Cloud Build: build and deploy to Cloud Run (prosodyai-api repo)
-# Run from api repo root. Trigger on push to trigger Cloud Run deploys.
+# Cloud Build: build and deploy to Cloud Run (API repo)
+# Set env vars in the trigger: Trigger → Edit → Substitution variables
+# Add _DATABASE_URL, _DIRECT_DATABASE_URL, _MODEL_ID, _MODEL_API_KEY, _CORS_ORIGINS, _ADMIN_API_KEY (mark secrets as Secret)
+#
 substitutions:
   _REGION: us-central1
   _SERVICE: prosody-api
+  _DATABASE_URL: ''
+  _DIRECT_DATABASE_URL: ''
+  _MODEL_ID: '31ddmz13'
+  _MODEL_API_KEY: ''
+  _CORS_ORIGINS: 'https://prosodyai.app,https://www.prosodyai.app'
+  _ADMIN_API_KEY: ''
 
 steps:
   - name: 'gcr.io/cloud-builders/docker'
@@ -27,6 +35,12 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
+      - '--set-env-vars=DATABASE_URL=${_DATABASE_URL}'
+      - '--set-env-vars=DIRECT_DATABASE_URL=${_DIRECT_DATABASE_URL}'
+      - '--set-env-vars=PROSODYAI_MODEL_ID=${_MODEL_ID}'
+      - '--set-env-vars=PROSODYAI_MODEL_API_KEY=${_MODEL_API_KEY}'
+      - '--set-env-vars=PROSODYAI_CORS_ORIGINS=${_CORS_ORIGINS}'
+      - '--set-env-vars=PROSODYAI_ADMIN_API_KEY=${_ADMIN_API_KEY}'
 
 images:
   - '${_REGION}-docker.pkg.dev/$PROJECT_ID/prosody/api:latest'
