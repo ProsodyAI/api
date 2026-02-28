@@ -1,14 +1,14 @@
 """
 Shared database helpers for ConversationSession, Transcript, and Audio.
 
-Uses the same asyncpg pool as api.kpis (get_kpi_loader()._get_pool()).
-Table names match apps/website/prisma (ConversationSession = conversation session).
+Uses the same asyncpg pool as kpis (get_kpi_loader()._get_pool()).
+Table names match website/prisma (ConversationSession = conversation session).
 """
 
 import logging
 from typing import Optional
 
-from api.kpis import get_kpi_loader
+from kpis import get_kpi_loader
 
 logger = logging.getLogger(__name__)
 

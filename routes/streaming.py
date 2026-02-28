@@ -20,11 +20,11 @@ from dataclasses import asdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from api.config import settings
-from api.db import create_session
-from api.middleware.auth import validate_api_key
-from api.kpis import get_kpi_loader, KPIDefinition
-from api.kpi_predictor import get_kpi_predictor, ProsodySignals
+from config import settings
+from db import create_session
+from middleware.auth import validate_api_key
+from kpis import get_kpi_loader, KPIDefinition
+from kpi_predictor import get_kpi_predictor, ProsodySignals
 
 logger = logging.getLogger(__name__)
 

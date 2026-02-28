@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, BackgroundTasks
 from pydantic import BaseModel, Field
 
-from api.config import settings
-from api.schemas import ProsodyFeaturesResponse, PhoneticFeaturesResponse
+from config import settings
+from schemas import ProsodyFeaturesResponse, PhoneticFeaturesResponse
 
 router = APIRouter()
 

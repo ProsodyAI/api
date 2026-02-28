@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, BackgroundTasks
 from pydantic import BaseModel, Field, HttpUrl
 
-from api.config import settings
-from api.db import create_session
-from api.model_client import get_model_client, ModelPrediction
-from api.kpis import get_kpi_loader
-from api.kpi_predictor import get_kpi_predictor, ProsodySignals
-from api.schemas import (
+from config import settings
+from db import create_session
+from model_client import get_model_client, ModelPrediction
+from kpis import get_kpi_loader
+from kpi_predictor import get_kpi_predictor, ProsodySignals
+from schemas import (
     AnalysisResponse,
     AnalysisRequest,
     ProsodyFeatures,

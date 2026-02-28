@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 ENV PORT=8080
 ENV PYTHONPATH=/app
 
-CMD ["sh", "-c", "python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT}"]

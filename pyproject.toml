@@ -37,10 +37,10 @@ production = [
 ]
 
 [project.scripts]
-prosodyai-api = "api.main:app"
+prosodyai-api = "main:app"
 
 [tool.setuptools.packages.find]
-include = ["api*"]
+include = ["routes*", "middleware*"]
 
 [tool.black]
 line-length = 100

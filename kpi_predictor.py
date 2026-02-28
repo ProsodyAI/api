@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from api.kpis import KPIDefinition, KPIType, KPIDirection, AlertDirection
+from kpis import KPIDefinition, KPIType, KPIDirection, AlertDirection
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ class ProsodySignals:
     @classmethod
     def from_model_prediction(cls, prediction) -> "ProsodySignals":
         """
-        Build from a ModelPrediction (api.model_client.ModelPrediction).
+        Build from a ModelPrediction (model_client.ModelPrediction).
 
         Extracts all available prosodic features — NO emotion fields.
         """

@@ -12,7 +12,7 @@ import os
 from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
-from api.config import settings
+from config import settings
 
 
 def _hash_key(api_key: str) -> str:
@@ -95,7 +95,7 @@ def validate_api_key(api_key: str) -> bool:
 async def _is_key_in_db(api_key: str) -> bool:
     """True if this key exists in ApiKey table (tenant key from dashboard/admin)."""
     try:
-        from api.kpis import get_kpi_loader
+        from kpis import get_kpi_loader
         loader = get_kpi_loader()
         org_id = await loader.get_organization_id(_hash_key(api_key))
         return org_id is not None

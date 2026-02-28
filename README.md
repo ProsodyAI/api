@@ -29,7 +29,7 @@ export PROSODYAI_BASETEN_MODEL_ID=your-model-id
 export PROSODYAI_BASETEN_API_KEY=your-baseten-api-key
 
 # Run the server
-uvicorn api.main:app --reload --port 8000
+uvicorn main:app --reload --port 8000
 ```
 
 ### Inference backend

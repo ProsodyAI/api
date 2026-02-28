@@ -19,10 +19,10 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import admin, analysis, feedback, health, features, streaming, sessions
-from api.middleware.rate_limit import RateLimitMiddleware
-from api.middleware.auth import get_api_key_header
-from api.config import settings
+from routes import admin, analysis, feedback, health, features, streaming, sessions
+from middleware.rate_limit import RateLimitMiddleware
+from middleware.auth import get_api_key_header
+from config import settings
 
 
 @asynccontextmanager
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     import uvicorn
     
     uvicorn.run(
-        "api.main:app",
+        "main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,

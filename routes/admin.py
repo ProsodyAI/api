@@ -14,8 +14,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel, Field
 
-from api.config import settings
-from api.kpis import get_kpi_loader
+from config import settings
+from kpis import get_kpi_loader
 
 logger = logging.getLogger(__name__)
 

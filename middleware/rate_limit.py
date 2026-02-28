@@ -11,7 +11,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from api.config import settings
+from config import settings
 
 
 class InMemoryRateLimiter:
@@ -121,7 +121,7 @@ def get_plan_for_key(api_key: str) -> str:
             return plan
     
     # All keys in the env var are Enterprise (internal/admin keys)
-    from api.middleware.auth import get_valid_keys
+    from .auth import get_valid_keys
     if api_key in get_valid_keys():
         _key_plan_cache[api_key] = ("enterprise", now)
         return "enterprise"

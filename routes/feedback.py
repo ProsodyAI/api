@@ -17,11 +17,11 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 
-from api.schemas import (
+from schemas import (
     FeedbackCorrectionRequest,
     SessionOutcomeRequest,
 )
-from api.kpis import get_kpi_loader
+from kpis import get_kpi_loader
 
 logger = logging.getLogger(__name__)
 

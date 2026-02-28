@@ -10,7 +10,7 @@ import asyncio
 import base64
 import httpx
 
-from api.config import settings
+from config import settings
 
 
 @dataclass
