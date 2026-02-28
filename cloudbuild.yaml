@@ -1,0 +1,34 @@
+# Cloud Build: build and deploy to Cloud Run (prosodyai-api repo)
+# Run from api repo root. Trigger on push to trigger Cloud Run deploys.
+substitutions:
+  _REGION: us-central1
+  _SERVICE: prosody-api
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/prosody/api:latest'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/prosody/api:latest'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/prosody/api:latest'
+
+timeout: 600s
