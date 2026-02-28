@@ -22,11 +22,11 @@ Client (SDK/LangChain) ──▶ API (auth + verticals) ──▶ Baseten (Proso
 # Install dependencies
 pip install -e ".[dev]"
 
-# Set environment variables (Baseten is used when model ID and API key are set)
+# Set environment variables (model inference when MODEL_ID and MODEL_API_KEY are set)
 export PROSODYAI_DEBUG=true
 export PROSODYAI_API_KEYS=demo-api-key,test-api-key
-export PROSODYAI_BASETEN_MODEL_ID=your-model-id
-export PROSODYAI_BASETEN_API_KEY=your-baseten-api-key
+export PROSODYAI_MODEL_ID=your-model-id
+export PROSODYAI_MODEL_API_KEY=your-model-api-key
 
 # Run the server
 uvicorn main:app --reload --port 8000
@@ -34,7 +34,7 @@ uvicorn main:app --reload --port 8000
 
 ### Inference backend
 
-- **Baseten** (default when credentials are set): Set `PROSODYAI_BASETEN_MODEL_ID` and `PROSODYAI_BASETEN_API_KEY`. Predict URL format: `https://model-<MODEL_ID>.api.baseten.co/environments/production/predict`.
+- **Model inference** (when credentials are set): Set `PROSODYAI_MODEL_ID` and `PROSODYAI_MODEL_API_KEY`. The API calls the inference backend (Baseten under the hood).
 - **Vertex AI** (optional): Set `PROSODYAI_USE_VERTEX_AI=true` and Vertex endpoint/config.
 
 ### API Documentation
@@ -151,10 +151,9 @@ Environment variables:
 | `PROSODYAI_PORT` | `8000` | Server port |
 | `PROSODYAI_DEBUG` | `false` | Enable debug mode |
 | `PROSODYAI_API_KEYS` | - | Comma-separated valid API keys |
-| `PROSODYAI_USE_BASETEN` | `false` | Use Baseten for inference (auto-true if Baseten credentials set) |
-| `PROSODYAI_BASETEN_MODEL_ID` | - | Baseten model ID (e.g. from Truss deploy) |
-| `PROSODYAI_BASETEN_API_KEY` | - | Baseten API key |
-| `PROSODYAI_BASETEN_DEPLOYMENT` | `production` | Baseten deployment name |
+| `PROSODYAI_MODEL_ID` | - | Model ID (inference backend) |
+| `PROSODYAI_MODEL_API_KEY` | - | API key for model inference |
+| `PROSODYAI_MODEL_DEPLOYMENT` | `production` | Model deployment (e.g. production / development) |
 | `PROSODYAI_SERVICE_TIMEOUT` | `60.0` | Model request timeout (seconds) |
 | `PROSODYAI_USE_VERTEX_AI` | `false` | Use Vertex AI instead of Baseten |
 | `PROSODYAI_VERTEX_ENDPOINT_ID` | - | Vertex AI endpoint ID |

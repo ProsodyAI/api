@@ -1,21 +1,18 @@
 """
 WebSocket endpoint for real-time prosodic feedback and KPI prediction.
 
-Receives PCM audio frames, extracts prosodic features, predicts KPI
-outcomes, and returns directives for voice agent adaptation.
-
-No emotion labels — raw prosodic signals drive everything.
-
-This is the API layer. The core logic lives in prosody_ssm.streaming.
+Receives PCM audio from SDK, runs frame extraction in-process, and sends
+accumulated audio to Baseten for real inference. Directives use model
+valence/arousal/emotion so the SDK gets production inference.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import uuid
 from typing import Optional
-from dataclasses import asdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -28,6 +25,35 @@ from kpi_predictor import get_kpi_predictor, ProsodySignals
 
 logger = logging.getLogger(__name__)
 
+# 1 second at 16 kHz mono int16
+STREAMING_INFERENCE_CHUNK_BYTES = 16000 * 2
+STREAMING_SAMPLE_RATE = 16000
+INFERENCE_TIMEOUT_SEC = 10.0
+
+
+def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = STREAMING_SAMPLE_RATE) -> bytes:
+    """Wrap raw PCM int16 mono in a WAV header so Baseten model (soundfile) can read it."""
+    import struct
+    n = len(pcm)
+    # WAV header: riff, size, wave, fmt chunk, data chunk
+    fmt = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + n,
+        b"WAVE",
+        b"fmt ",
+        16,  # fmt chunk size
+        1,   # PCM
+        1,   # mono
+        sample_rate,
+        sample_rate * 2,
+        2,   # block align
+        16,  # bits per sample
+        b"data",
+        n,
+    )
+    return fmt + pcm
+
 # Lazy-load pipeline components
 _pipeline = None
 _bus = None
@@ -35,38 +61,24 @@ _store = None
 
 
 def _get_pipeline():
-    """Lazy-initialize the ProsodicPipeline singleton."""
+    """Lazy-initialize the ProsodicPipeline singleton (heuristic mode, no model)."""
     global _pipeline, _bus, _store
 
     if _pipeline is not None:
         return _pipeline, _bus, _store
 
-    from prosody_ssm.streaming.bus import WebSocketAudioBus
-    from prosody_ssm.streaming.session import InMemorySessionStore
-    from prosody_ssm.streaming.pipeline import ProsodicPipeline
+    from streaming.bus import WebSocketAudioBus
+    from streaming.session import InMemorySessionStore
+    from streaming.pipeline import ProsodicPipeline
 
     _bus = WebSocketAudioBus()
     _store = InMemorySessionStore()
-
-    # Try to load model
-    model = None
-    try:
-        import torch
-        from prosody_ssm.model import ProsodySSMClassifier
-
-        model = ProsodySSMClassifier()
-        model.eval()
-        logger.info("ProsodySSM model loaded for streaming pipeline")
-    except Exception as e:
-        logger.warning(f"Running pipeline in heuristic mode (no model): {e}")
-
     _pipeline = ProsodicPipeline(
-        model=model,
-        predictor=None,  # KPI predictions handled at API layer now
+        model=None,  # Heuristic mode; inference via Baseten for analysis, not streaming
+        predictor=None,
         bus=_bus,
         store=_store,
     )
-
     return _pipeline, _bus, _store
 
 
@@ -113,13 +125,17 @@ async def websocket_realtime(websocket: WebSocket):
     session_id = str(uuid.uuid4())
     pipeline, bus, store = _get_pipeline()
 
-    from prosody_ssm.streaming.adapters.websocket import WebSocketAdapter
+    from streaming.adapters.websocket import WebSocketAdapter
     adapter = WebSocketAdapter(bus)
 
     config = StreamConfig()
     api_key_hash: Optional[str] = None
     client_kpis: list[KPIDefinition] = []
     prosody_history: list[ProsodySignals] = []
+
+    # Per-session: accumulate PCM for Baseten inference; use latest prediction in directives (SDK gets real model output)
+    audio_buffer: bytearray = bytearray()
+    latest_inference = None  # ModelPrediction when we have one
 
     try:
         while True:
@@ -189,40 +205,69 @@ async def websocket_realtime(websocket: WebSocket):
                     await adapter.handle_message(session_id, data["text"])
                     continue
 
-            # Handle binary messages (raw PCM)
+            # Handle binary messages (raw PCM) — SDK sends this; we run Baseten inference when we have enough audio
             elif "bytes" in data and data["bytes"]:
                 pcm_data = data["bytes"]
+                audio_buffer.extend(pcm_data)
+
+                # When we have ~1s of audio, call Baseten for real inference (same endpoint as analysis)
+                if len(audio_buffer) >= STREAMING_INFERENCE_CHUNK_BYTES and settings.model_id and settings.model_api_key:
+                    chunk = bytes(audio_buffer[:STREAMING_INFERENCE_CHUNK_BYTES])
+                    audio_buffer = audio_buffer[STREAMING_INFERENCE_CHUNK_BYTES:]
+                    try:
+                        from model_client import get_model_client
+                        client = get_model_client()
+                        wav_bytes = _pcm_to_wav_bytes(chunk)
+                        b64 = base64.b64encode(wav_bytes).decode("utf-8")
+                        pred = await asyncio.wait_for(
+                            client.predict_from_base64(b64, language="en"),
+                            timeout=INFERENCE_TIMEOUT_SEC,
+                        )
+                        latest_inference = pred
+                    except Exception as e:
+                        logger.debug("Streaming inference failed (using heuristic): %s", e)
 
                 output = await pipeline.process_frame(session_id, pcm_data)
 
                 if output is not None:
                     directive = output.directive
 
-                    # Build prosody signals from pipeline output
+                    # Use Baseten inference when we have it so SDK gets real model output
+                    if latest_inference is not None:
+                        valence = latest_inference.valence
+                        arousal = latest_inference.arousal
+                        dominance = latest_inference.dominance
+                        confidence = latest_inference.confidence
+                        emotion = latest_inference.emotion
+                    else:
+                        valence = directive.valence
+                        arousal = directive.arousal
+                        dominance = getattr(directive, "dominance", 0.5)
+                        confidence = directive.confidence
+                        emotion = getattr(directive, "current_emotion", "neutral")
+
                     signals = ProsodySignals(
-                        valence=directive.valence,
-                        arousal=directive.arousal,
-                        dominance=getattr(directive, "dominance", 0.5),
+                        valence=valence,
+                        arousal=arousal,
+                        dominance=dominance,
                     )
                     prosody_history.append(signals)
 
-                    # Build directive response
                     response_data = {
                         "type": "directive",
                         "session_id": session_id,
-                        # Prosodic signals (the core data)
                         "prosody": {
-                            "valence": round(directive.valence, 3),
-                            "arousal": round(directive.arousal, 3),
-                            "dominance": round(getattr(directive, "dominance", 0.5), 3),
+                            "valence": round(valence, 3),
+                            "arousal": round(arousal, 3),
+                            "dominance": round(dominance, 3),
                         },
-                        # TTS adaptation (prosody-driven, not emotion-driven)
                         "tts_speed": directive.tts_speed,
-                        # Metadata
-                        "confidence": round(directive.confidence, 3),
+                        "confidence": round(confidence, 3),
                         "frames_processed": directive.frames_processed,
                         "timestamp_ms": directive.timestamp_ms,
                     }
+                    if latest_inference is not None:
+                        response_data["emotion"] = emotion
 
                     # KPI predictions
                     if client_kpis:

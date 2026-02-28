@@ -29,7 +29,7 @@ def get_prosody_extractor():
     """Get or create prosody feature extractor."""
     global _prosody_extractor
     if _prosody_extractor is None:
-        from prosody_ssm import ProsodyFeatureExtractor
+        from feature_extraction import ProsodyFeatureExtractor
         _prosody_extractor = ProsodyFeatureExtractor(sample_rate=settings.sample_rate)
     return _prosody_extractor
 
@@ -38,7 +38,7 @@ def get_phonetic_extractor():
     """Get or create phonetic feature extractor."""
     global _phonetic_extractor
     if _phonetic_extractor is None:
-        from prosody_ssm import PhoneticFeatureExtractor
+        from feature_extraction import PhoneticFeatureExtractor
         _phonetic_extractor = PhoneticFeatureExtractor()
     return _phonetic_extractor
 

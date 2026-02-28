@@ -309,11 +309,11 @@ class BasetenClient(ModelServiceClient):
         api_key: Optional[str] = None,
         deployment: Optional[str] = None,
     ):
-        model_id = model_id or settings.baseten_model_id
-        api_key = api_key or settings.baseten_api_key
-        deployment = (deployment or settings.baseten_deployment).strip("/")
+        model_id = model_id or settings.model_id
+        api_key = api_key or settings.model_api_key
+        deployment = (deployment or settings.model_deployment).strip("/")
         if not model_id or not api_key:
-            raise ValueError("baseten_model_id and baseten_api_key required for Baseten")
+            raise ValueError("PROSODYAI_MODEL_ID and PROSODYAI_MODEL_API_KEY required for model inference")
         service_url = f"https://model-{model_id}.api.baseten.co/environments/{deployment}"
         super().__init__(service_url=service_url, api_key=api_key)
 
@@ -363,9 +363,7 @@ def get_model_client() -> ModelServiceClient:
     global _model_client
 
     if _model_client is None:
-        use_baseten = settings.use_baseten or (
-            bool(settings.baseten_model_id and settings.baseten_api_key)
-        )
+        use_baseten = bool(settings.model_id and settings.model_api_key)
         if use_baseten:
             _model_client = BasetenClient()
         elif settings.use_vertex_ai:

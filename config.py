@@ -39,17 +39,15 @@ class Settings(BaseSettings):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v if isinstance(v, list) else ["*"]
 
-    # Model inference backend: Baseten (primary) or Vertex AI
+    # Model inference (Baseten under the hood; env vars are ProsodyAI-only)
     service_timeout: float = 60.0
     service_api_key: Optional[str] = None  # Optional auth for direct service_url (legacy)
 
-    # Baseten dedicated deployment (recommended)
-    use_baseten: bool = False
-    baseten_model_id: Optional[str] = None  # e.g. "abc123"
-    baseten_api_key: Optional[str] = None
-    baseten_deployment: str = "production"  # "production" or "development" or deployment ID
+    model_id: Optional[str] = None  # PROSODYAI_MODEL_ID
+    model_api_key: Optional[str] = None  # PROSODYAI_MODEL_API_KEY
+    model_deployment: str = "production"  # PROSODYAI_MODEL_DEPLOYMENT
 
-    # Optional: direct model service URL (legacy; prefer Baseten)
+    # Optional: direct model service URL (legacy)
     service_url: str = ""
 
     # GCP / Vertex AI (optional)
