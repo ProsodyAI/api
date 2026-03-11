@@ -12,15 +12,14 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
-
 from config import settings
 from db import create_session
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from kpi_predictor import ProsodySignals, get_kpi_predictor
+from kpis import KPIDefinition, get_kpi_loader
 from middleware.auth import validate_api_key
-from kpis import get_kpi_loader, KPIDefinition
-from kpi_predictor import get_kpi_predictor, ProsodySignals
-from storage import upload_audio, upload_transcript, get_org_slug
+from pydantic import BaseModel
+from storage import get_org_slug, upload_audio, upload_transcript
 from streaming.pipeline import get_pipeline
 from streaming.session import InMemorySessionStore, SessionState
 
@@ -134,7 +133,7 @@ async def websocket_realtime(websocket: WebSocket):
                 await websocket.send_json({"type": "keepalive"})
                 continue
 
-            
+
 
             if "text" in data:
                 msg = json.loads(data["text"])

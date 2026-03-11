@@ -2,10 +2,10 @@
 API configuration settings.
 """
 
-import os
 from functools import lru_cache
-from typing import Optional, Union
-from pydantic import Field, field_validator, model_validator
+from typing import Optional
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080  # Cloud Run default
     debug: bool = False
-    
+
     # Authentication
     api_key_header: str = "X-API-Key"
     api_keys_file: Optional[str] = None
@@ -28,12 +28,12 @@ class Settings(BaseSettings):
     # Admin API (tenant API keys, RBAC) — required for /v1/admin/* routes
     admin_api_key: Optional[str] = None
     admin_api_key_header: str = "X-Admin-Key"
-    
+
     # Rate limiting
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100  # requests per window
     rate_limit_window: int = 86400  # window in seconds (24 hours)
-    
+
     # CORS — set in prod (e.g. PROSODYAI_CORS_ORIGINS=https://prosodyai.app,https://www.prosodyai.app)
     cors_origins: str = "*"
 
@@ -57,19 +57,19 @@ class Settings(BaseSettings):
     gcp_region: str = "us-central1"
     use_vertex_ai: bool = False
     vertex_endpoint_id: Optional[str] = None
-    
+
     # Audio processing
     sample_rate: int = 16000  # Audio sample rate for feature extraction
-    
+
     # Storage
     temp_dir: str = "/tmp/prosodyai"
     max_file_size: int = 50 * 1024 * 1024  # 50MB
     gcs_bucket: Optional[str] = None  # For large file uploads
     org_bucket: str = "prosodyai-org-data"  # PROSODYAI_ORG_BUCKET — default bucket for org audio/transcripts
-    
+
     # Redis (for rate limiting in production)
     redis_url: Optional[str] = None
-    
+
     class Config:
         env_prefix = "PROSODYAI_"
         env_file = ".env"

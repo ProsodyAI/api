@@ -33,8 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from kpis import KPIDefinition, KPIType, KPIDirection, AlertDirection
-
+from kpis import AlertDirection, KPIDefinition, KPIDirection, KPIType
 
 # ---------------------------------------------------------------------------
 # Prediction result types

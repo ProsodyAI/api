@@ -29,7 +29,6 @@ def _get_encoder():
         return _encoder
     try:
         from resemblyzer import VoiceEncoder
-        from resemblyzer.audio import preprocess_wav
         _encoder = VoiceEncoder(verbose=False)
         return _encoder
     except ImportError:

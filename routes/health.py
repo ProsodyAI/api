@@ -13,7 +13,7 @@ router = APIRouter()
 async def health_check():
     """
     Health check endpoint.
-    
+
     Returns service status and version information.
     """
     return {

@@ -13,11 +13,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import numpy as np
-
-from config import settings
 from kpi_predictor import ProsodySignals
-from streaming.speaker_utils import get_embedding, assign_speaker
+from streaming.speaker_utils import assign_speaker, get_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +108,7 @@ def _rms(pcm: bytes) -> float:
 async def _transcribe_chunk(wav_bytes: bytes) -> str:
     """Transcribe a WAV chunk using OpenAI Whisper API."""
     import os
+
     import httpx
 
     api_key = os.getenv("OPENAI_API_KEY")

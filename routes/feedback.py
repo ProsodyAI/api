@@ -15,13 +15,12 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
-
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from kpis import get_kpi_loader
 from schemas import (
     FeedbackCorrectionRequest,
     SessionOutcomeRequest,
 )
-from kpis import get_kpi_loader
 
 logger = logging.getLogger(__name__)
 

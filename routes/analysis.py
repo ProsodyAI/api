@@ -7,35 +7,32 @@ Clients define their KPIs on the Next.js dashboard.  This API reads those
 definitions and predicts outcomes based on raw prosodic signals.
 """
 
+import base64
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Optional
-import base64
 import os
 import uuid
+from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, BackgroundTasks
-from pydantic import BaseModel, Field, HttpUrl
-
 from config import settings
 from db import create_session
-from model_client import get_model_client, ModelPrediction
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from kpi_predictor import ProsodySignals, get_kpi_predictor
 from kpis import get_kpi_loader
-from storage import get_org_slug, upload_audio, upload_transcript
-from kpi_predictor import get_kpi_predictor, ProsodySignals
+from model_client import ModelPrediction, get_model_client
 from schemas import (
-    AnalysisResponse,
     AnalysisRequest,
+    AnalysisResponse,
+    KPIAlertResult,
+    KPIPredictionResult,
     ProsodyFeatures,
     ProsodyMarkers,
-    KPIPredictionResult,
-    KPIAlertResult,
 )
+from storage import get_org_slug, upload_audio, upload_transcript
 
 router = APIRouter()
 
@@ -302,7 +299,7 @@ async def analyze_audio_file(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Model inference failed during audio file analysis")
         raise HTTPException(
             status_code=500,
@@ -380,7 +377,7 @@ async def analyze_base64_audio(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Model inference failed during base64 audio analysis")
         raise HTTPException(
             status_code=500,

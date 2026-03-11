@@ -12,17 +12,14 @@ Clients define their KPIs on the Next.js dashboard (../prosodyai-website).
 """
 
 from contextlib import asynccontextmanager
-from typing import Optional
-import os
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from config import settings
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from routes import admin, analysis, feedback, health, features, streaming, sessions
-from middleware.rate_limit import RateLimitMiddleware
 from middleware.auth import get_api_key_header
-from config import settings
+from middleware.rate_limit import RateLimitMiddleware
+from routes import admin, analysis, features, feedback, health, sessions, streaming
 
 
 @asynccontextmanager
@@ -39,23 +36,23 @@ app = FastAPI(
     title="ProsodyAI API",
     description="""
     Prosody-driven KPI prediction API powered by State Space Models.
-    
+
     ## How It Works
-    
+
     1. **Define KPIs** on the ProsodyAI dashboard (what you care about)
     2. **Send audio** to this API
     3. **Get predictions** for your KPIs based on raw prosodic signals
     4. **Report outcomes** to close the feedback loop and improve predictions
-    
+
     ## Features
-    
+
     - **Prosody Analysis**: Extract pitch, energy, rhythm, voice quality features
     - **KPI Prediction**: Predict outcomes for your custom KPIs
     - **Real-time Streaming**: WebSocket-based prosodic feedback for voice agents
     - **Actionable Recommendations**: What to change to improve KPI outcomes
-    
+
     ## Authentication
-    
+
     All endpoints require an API key passed via the `X-API-Key` header.
     Manage API keys on the ProsodyAI dashboard.
     """,
@@ -147,7 +144,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "main:app",
         host=settings.host,

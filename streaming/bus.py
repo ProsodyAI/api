@@ -4,10 +4,10 @@ AudioBus abstraction for audio transport.
 WebSocketAudioBus for MVP (in-process, no external deps).
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
-import asyncio
 
 
 @dataclass

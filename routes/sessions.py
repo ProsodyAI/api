@@ -9,12 +9,11 @@ import hashlib
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
-
 from db import create_session, get_session_organization_id
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from kpis import get_kpi_loader
 from middleware.auth import get_api_key_header
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 

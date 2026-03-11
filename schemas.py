@@ -6,8 +6,8 @@ Pipeline: audio → prosodic features → KPI predictions.
 """
 
 from typing import Any, Optional
-from pydantic import BaseModel, Field, HttpUrl
 
+from pydantic import BaseModel, Field, HttpUrl
 
 # ==============================================================================
 # Prosodic Signal Schemas

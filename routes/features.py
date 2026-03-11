@@ -3,19 +3,15 @@ Feature extraction endpoints.
 """
 
 import logging
-from typing import Optional
-import base64
 import os
-import tempfile
 import uuid
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, BackgroundTasks
-from pydantic import BaseModel, Field
-
 from config import settings
-from schemas import ProsodyFeaturesResponse, PhoneticFeaturesResponse
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+from schemas import PhoneticFeaturesResponse, ProsodyFeaturesResponse
 
 router = APIRouter()
 
@@ -55,7 +51,7 @@ async def extract_prosody_features(
 ):
     """
     Extract prosodic features from audio.
-    
+
     Features extracted:
     - Pitch (F0): mean, std, min, max, range
     - Energy: mean, std
@@ -69,17 +65,17 @@ async def extract_prosody_features(
             status_code=413,
             detail=f"File too large. Maximum size is {settings.max_file_size // (1024*1024)}MB",
         )
-    
+
     os.makedirs(settings.temp_dir, exist_ok=True)
     temp_path = os.path.join(settings.temp_dir, f"{uuid.uuid4()}{os.path.splitext(file.filename or '.wav')[1]}")
-    
+
     try:
         with open(temp_path, "wb") as f:
             f.write(content)
-        
+
         extractor = get_prosody_extractor()
         features = extractor.extract_from_file(temp_path)
-        
+
         return ProsodyFeaturesResponse(
             f0_mean=features.f0_mean,
             f0_std=features.f0_std,
@@ -98,7 +94,7 @@ async def extract_prosody_features(
             spectral_rolloff_mean=features.spectral_rolloff_mean,
             mfcc_means=features.mfcc_means.tolist() if hasattr(features.mfcc_means, 'tolist') else list(features.mfcc_means),
         )
-    
+
     finally:
         background_tasks.add_task(cleanup_temp_file, temp_path)
 
@@ -118,17 +114,17 @@ class TextInput(BaseModel):
 async def extract_phonetic_features(request: TextInput):
     """
     Extract phonetic features from text.
-    
+
     Features extracted:
     - Phoneme list
     - Vowel/consonant ratios
     - Stressed syllable count
     """
     extractor = get_phonetic_extractor()
-    
+
     try:
         features = extractor.extract_from_text(request.text)
-        
+
         return PhoneticFeaturesResponse(
             phonemes=features.phonemes,
             vowel_ratio=features.vowel_ratio,
@@ -136,7 +132,7 @@ async def extract_phonetic_features(request: TextInput):
             stressed_syllable_count=features.stressed_syllable_count,
             phoneme_count=len(features.phonemes),
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Feature extraction failed")
         raise HTTPException(
             status_code=500,

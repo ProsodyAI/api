@@ -4,10 +4,10 @@ Session state management for the prosodic pipeline.
 InMemorySessionStore for MVP (single process).
 """
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
-import time
 
 
 @dataclass

@@ -11,11 +11,10 @@ import secrets
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, status
-from pydantic import BaseModel, Field
-
 from config import settings
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from kpis import get_kpi_loader
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
