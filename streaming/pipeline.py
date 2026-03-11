@@ -11,10 +11,13 @@ import logging
 import struct
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
+
+import numpy as np
 
 from config import settings
 from kpi_predictor import ProsodySignals
+from streaming.speaker_utils import get_embedding, assign_speaker
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,9 @@ CHUNK_SECONDS = 5
 CHUNK_BYTES = 16000 * 2 * CHUNK_SECONDS  # 5 seconds at 16kHz mono int16
 INFERENCE_TIMEOUT = 10.0
 VAD_RMS_THRESHOLD = 300
+
+# Temporal smoothing: EMA factor (higher = more weight on new frame, less smoothing)
+SMOOTH_ALPHA = 0.35  # ~3–4 chunks to settle; tune down for stronger smoothing
 
 
 @dataclass
@@ -36,6 +42,34 @@ class AgentDirective:
     text: str = ""
     frames_processed: int = 0
     timestamp_ms: int = 0
+    speaker_id: str = "unknown"  # "agent" | "caller" | "speaker_0" | "speaker_1" | ...
+
+
+def _ema(alpha: float, raw: float, prev: Optional[float]) -> float:
+    """Exponential moving average. Returns raw if prev is None."""
+    if prev is None:
+        return raw
+    return alpha * raw + (1.0 - alpha) * prev
+
+
+def _smooth_emotion_probs(
+    alpha: float,
+    raw_probs: dict[str, float],
+    prev_probs: Optional[dict[str, float]],
+) -> dict[str, float]:
+    """EMA over emotion probability dict. Returns normalized smoothed probs."""
+    all_labels = set(raw_probs) | (set(prev_probs) if prev_probs else set())
+    if not all_labels:
+        return dict(raw_probs)
+    smoothed = {}
+    for label in all_labels:
+        r = raw_probs.get(label, 0.0)
+        p = prev_probs.get(label, 0.0) if prev_probs else None
+        smoothed[label] = _ema(alpha, r, p)
+    total = sum(smoothed.values())
+    if total > 0:
+        smoothed = {k: v / total for k, v in smoothed.items()}
+    return smoothed
 
 
 @dataclass
@@ -48,6 +82,15 @@ class PipelineSession:
     frames_processed: int = 0
     start_time: float = field(default_factory=time.time)
     last_directive: Optional[AgentDirective] = None
+    # Temporal smoothing state (EMA of last output)
+    _smooth_valence: Optional[float] = None
+    _smooth_arousal: Optional[float] = None
+    _smooth_dominance: Optional[float] = None
+    _smooth_confidence: Optional[float] = None
+    _smooth_emotion_probs: Optional[dict[str, float]] = None
+    # Speaker detection: optional agent embedding for agent vs caller; else multi-speaker centroids
+    agent_embedding: Any = None  # np.ndarray 256-d (set at session start for agent vs caller)
+    _speaker_centroids: Any = None  # list of (label, np.ndarray) for multi-speaker clustering
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
@@ -153,38 +196,83 @@ class ProsodicPipeline:
             except Exception:
                 pass
 
+            # Speaker detection: agent vs caller (if agent_embedding set) or multi-speaker clustering
+            speaker_id = "unknown"
+            emb = get_embedding(wav)
+            if emb is not None:
+                agent_emb = session.agent_embedding
+                centroids = session._speaker_centroids
+                speaker_id, updated_centroids = assign_speaker(
+                    emb,
+                    agent_embedding=agent_emb,
+                    centroids=centroids,
+                )
+                session._speaker_centroids = updated_centroids
+
+            # Temporal smoothing: EMA over VAD, confidence, and emotion probabilities
+            smooth_probs = _smooth_emotion_probs(
+                SMOOTH_ALPHA,
+                pred.emotion_probabilities or {pred.emotion: pred.confidence},
+                session._smooth_emotion_probs,
+            )
+            session._smooth_emotion_probs = smooth_probs
+            smooth_valence = _ema(SMOOTH_ALPHA, pred.valence, session._smooth_valence)
+            smooth_arousal = _ema(SMOOTH_ALPHA, pred.arousal, session._smooth_arousal)
+            smooth_dominance = _ema(SMOOTH_ALPHA, pred.dominance, session._smooth_dominance)
+            smooth_confidence = _ema(SMOOTH_ALPHA, pred.confidence, session._smooth_confidence)
+            session._smooth_valence = smooth_valence
+            session._smooth_arousal = smooth_arousal
+            session._smooth_dominance = smooth_dominance
+            session._smooth_confidence = smooth_confidence
+            # Smoothed emotion = argmax of smoothed probabilities
+            if smooth_probs:
+                smooth_emotion = max(smooth_probs, key=smooth_probs.get)
+            else:
+                smooth_emotion = pred.emotion
+                smooth_confidence = pred.confidence
+
             session.frames_processed += 1
             elapsed_ms = int((time.time() - session.start_time) * 1000)
 
             signals = ProsodySignals(
-                valence=pred.valence,
-                arousal=pred.arousal,
-                dominance=pred.dominance,
+                valence=smooth_valence,
+                arousal=smooth_arousal,
+                dominance=smooth_dominance,
             )
             session.prosody_history.append(signals)
 
             directive = AgentDirective(
                 session_id=session_id,
-                valence=pred.valence,
-                arousal=pred.arousal,
-                dominance=pred.dominance,
-                emotion=pred.emotion,
-                confidence=pred.confidence,
+                valence=smooth_valence,
+                arousal=smooth_arousal,
+                dominance=smooth_dominance,
+                emotion=smooth_emotion,
+                confidence=smooth_confidence,
                 text=pred.text,
                 frames_processed=session.frames_processed,
                 timestamp_ms=elapsed_ms,
+                speaker_id=speaker_id,
             )
             session.last_directive = directive
 
             logger.info(
-                f"Session {session_id}: {pred.emotion} ({pred.confidence:.2f}) "
-                f"v={pred.valence:.2f} a={pred.arousal:.2f} d={pred.dominance:.2f}"
+                f"Session {session_id}: {smooth_emotion} ({smooth_confidence:.2f}) speaker={speaker_id} "
+                f"v={smooth_valence:.2f} a={smooth_arousal:.2f} d={smooth_dominance:.2f}"
             )
             return directive
 
         except Exception as e:
             print(f"MODEL FAILED: {e}", flush=True)
             return None
+
+    def set_agent_embedding_from_audio(self, session_id: str, wav_bytes: bytes) -> bool:
+        """Enroll agent voice from reference WAV (16 kHz mono). Enables agent vs caller labeling."""
+        emb = get_embedding(wav_bytes)
+        if emb is None:
+            return False
+        session = self._get_session(session_id)
+        session.agent_embedding = emb
+        return True
 
     def get_session(self, session_id: str) -> Optional[PipelineSession]:
         return self._sessions.get(session_id)

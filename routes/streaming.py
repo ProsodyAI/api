@@ -176,6 +176,19 @@ async def websocket_realtime(websocket: WebSocket):
                     })
                     continue
 
+                elif msg_type == "enroll_agent":
+                    # Optional: enroll agent voice from reference WAV (base64) for agent vs caller labeling
+                    audio_b64 = msg.get("audio_base64")
+                    if audio_b64:
+                        try:
+                            import base64
+                            wav_bytes = base64.b64decode(audio_b64)
+                            ok = pipeline.set_agent_embedding_from_audio(session_id, wav_bytes)
+                            await websocket.send_json({"type": "enroll_agent_ack", "ok": ok})
+                        except Exception as e:
+                            await websocket.send_json({"type": "enroll_agent_ack", "ok": False, "error": str(e)})
+                    continue
+
                 elif msg_type == "end":
                     _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
                     session = pipeline.get_session(session_id)
@@ -215,6 +228,7 @@ async def websocket_realtime(websocket: WebSocket):
                     "text": directive.text,
                     "frames_processed": directive.frames_processed,
                     "timestamp_ms": directive.timestamp_ms,
+                    "speaker_id": directive.speaker_id,
                 }
 
                 if client_kpis:
