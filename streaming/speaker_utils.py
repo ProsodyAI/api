@@ -28,7 +28,8 @@ def _get_encoder():
     if _encoder is not None:
         return _encoder
     try:
-        from resemblyzer import VoiceEncoder
+        from resemblyzer import VoiceEncoder  # type: ignore[import-untyped]
+
         _encoder = VoiceEncoder(verbose=False)
         return _encoder
     except ImportError:
@@ -102,7 +103,7 @@ def assign_speaker(
     centroids = list(centroids) if centroids else []
     best_idx = -1
     best_sim = -1.0
-    for i, (label, cent) in enumerate(centroids):
+    for i, (_label, cent) in enumerate(centroids):
         sim = cosine_similarity(embedding, cent)
         if sim > best_sim:
             best_sim = sim

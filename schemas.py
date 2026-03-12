@@ -110,6 +110,12 @@ class AnalysisResponse(BaseModel):
     # Prosodic signals — the core output
     prosody: ProsodyFeatures = Field(..., description="Raw prosodic feature vector")
 
+    # Interpreted prosodic signals from the SSM hidden state
+    signals: Optional[dict[str, float]] = Field(
+        None,
+        description="Interpreted prosodic signals: engagement, stress, certainty, rapport, empathy, tempo, intensity, expressiveness",
+    )
+
     # Audio metadata
     duration: float = Field(default=0.0, ge=0.0, description="Audio duration in seconds")
     word_count: int = Field(default=0, ge=0, description="Number of words")

@@ -18,13 +18,16 @@ from streaming.speaker_utils import assign_speaker, get_embedding
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SECONDS = 5
-CHUNK_BYTES = 16000 * 2 * CHUNK_SECONDS  # 5 seconds at 16kHz mono int16
+CHUNK_SECONDS = 2
+TARGET_SAMPLE_RATE = 16000
+CHUNK_BYTES = TARGET_SAMPLE_RATE * 2 * CHUNK_SECONDS  # 2 seconds at 16kHz mono int16
 INFERENCE_TIMEOUT = 10.0
-VAD_RMS_THRESHOLD = 300
+VAD_RMS_THRESHOLD = 200
+# Peak normalize to this fraction of int16 range so phone (quiet) and mic (loud) are comparable
+NORMALIZE_PEAK = 0.9
 
 # Temporal smoothing: EMA factor (higher = more weight on new frame, less smoothing)
-SMOOTH_ALPHA = 0.35  # ~3–4 chunks to settle; tune down for stronger smoothing
+SMOOTH_ALPHA = 0.6  # Higher = more responsive; with 2s chunks we need less smoothing
 
 
 @dataclass
@@ -40,6 +43,7 @@ class AgentDirective:
     frames_processed: int = 0
     timestamp_ms: int = 0
     speaker_id: str = "unknown"  # "agent" | "caller" | "speaker_0" | "speaker_1" | ...
+    signals: dict[str, float] = field(default_factory=dict)
 
 
 def _ema(alpha: float, raw: float, prev: Optional[float]) -> float:
@@ -85,9 +89,12 @@ class PipelineSession:
     _smooth_dominance: Optional[float] = None
     _smooth_confidence: Optional[float] = None
     _smooth_emotion_probs: Optional[dict[str, float]] = None
+    _smooth_signals: Optional[dict[str, float]] = None
     # Speaker detection: optional agent embedding for agent vs caller; else multi-speaker centroids
     agent_embedding: Any = None  # np.ndarray 256-d (set at session start for agent vs caller)
     _speaker_centroids: Any = None  # list of (label, np.ndarray) for multi-speaker clustering
+    # Previous transcript (used as Whisper prompt for continuity)
+    last_transcript: str = ""
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
@@ -105,7 +112,9 @@ def _rms(pcm: bytes) -> float:
     return (sum(s * s for s in samples) / len(samples)) ** 0.5 if samples else 0
 
 
-async def _transcribe_chunk(wav_bytes: bytes) -> str:
+TRANSCRIPT_PROMPT_MAX_CHARS = 224  # Whisper prompt limit (for context continuity)
+
+async def _transcribe_chunk(wav_bytes: bytes, language: str = "en", prompt: Optional[str] = None) -> str:
     """Transcribe a WAV chunk using OpenAI Whisper API."""
     import os
 
@@ -119,12 +128,20 @@ async def _transcribe_chunk(wav_bytes: bytes) -> str:
     if not api_key:
         return ""
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    data: dict = {
+        "model": "whisper-1",
+        "response_format": "text",
+        "language": language,
+    }
+    if prompt and prompt.strip():
+        data["prompt"] = prompt.strip()[-TRANSCRIPT_PROMPT_MAX_CHARS:]
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": ("chunk.wav", wav_bytes, "audio/wav")},
-            data={"model": "whisper-1", "response_format": "text"},
+            data=data,
         )
         resp.raise_for_status()
         return resp.text.strip()
@@ -132,10 +149,10 @@ async def _transcribe_chunk(wav_bytes: bytes) -> str:
 
 class ProsodicPipeline:
     """
-    Streaming pipeline that sends audio chunks to the Baseten ProsodySSM model.
+    Streaming pipeline: audio chunks → model inference → directives.
 
     Usage:
-        pipeline = BasetenPipeline()
+        pipeline = ProsodicPipeline()
         directive = await pipeline.process_audio(session_id, pcm_bytes)
         if directive:
             # send to client
@@ -147,7 +164,7 @@ class ProsodicPipeline:
 
     def _get_client(self):
         if self._client is None:
-            from model_client import get_model_client
+            from client import get_model_client
             self._client = get_model_client()
         return self._client
 
@@ -159,7 +176,7 @@ class ProsodicPipeline:
     async def process_audio(self, session_id: str, pcm_data: bytes) -> Optional[AgentDirective]:
         """
         Feed PCM audio into the pipeline. Returns an AgentDirective when
-        enough audio has accumulated (1s) and the Baseten model returns a result.
+        enough audio has accumulated and the model returns a result.
         Returns None if still accumulating or audio is silence.
         """
         session = self._get_session(session_id)
@@ -180,19 +197,23 @@ class ProsodicPipeline:
             client = self._get_client()
             wav = _pcm_to_wav(chunk)
             b64 = base64.b64encode(wav).decode("utf-8")
+            prompt = session.last_transcript[-TRANSCRIPT_PROMPT_MAX_CHARS:] if session.last_transcript else None
 
-            print(f"CALLING MODEL: url={client.service_url} wav_bytes={len(wav)} b64_len={len(b64)} chunk_bytes={len(chunk)}", flush=True)
-
-            pred = await asyncio.wait_for(
+            # Run inference and transcription in parallel so transcript streams every 2s
+            model_task = asyncio.ensure_future(asyncio.wait_for(
                 client.predict_from_base64(b64, language="en"),
                 timeout=INFERENCE_TIMEOUT,
-            )
-            print(f"MODEL RESULT: emotion={pred.emotion} conf={pred.confidence} v={pred.valence} a={pred.arousal} d={pred.dominance}", flush=True)
+            ))
+            transcribe_task = asyncio.ensure_future(_transcribe_chunk(wav, language="en", prompt=prompt))
 
+            pred = await model_task
             try:
-                pred.text = await _transcribe_chunk(wav)
+                pred.text = await asyncio.wait_for(transcribe_task, timeout=8.0)
+                if pred.text:
+                    session.last_transcript = pred.text
             except Exception:
-                pass
+                transcribe_task.cancel()
+                pred.text = ""
 
             # Speaker detection: agent vs caller (if agent_embedding set) or multi-speaker clustering
             speaker_id = "unknown"
@@ -229,15 +250,23 @@ class ProsodicPipeline:
                 smooth_emotion = pred.emotion
                 smooth_confidence = pred.confidence
 
+            # Smooth prosodic signals
+            raw_signals = pred.signals or {}
+            smooth_signals = {}
+            prev_signals = session._smooth_signals or {}
+            for key, val in raw_signals.items():
+                smooth_signals[key] = _ema(SMOOTH_ALPHA, val, prev_signals.get(key))
+            session._smooth_signals = smooth_signals
+
             session.frames_processed += 1
             elapsed_ms = int((time.time() - session.start_time) * 1000)
 
-            signals = ProsodySignals(
+            prosody_signals = ProsodySignals(
                 valence=smooth_valence,
                 arousal=smooth_arousal,
                 dominance=smooth_dominance,
             )
-            session.prosody_history.append(signals)
+            session.prosody_history.append(prosody_signals)
 
             directive = AgentDirective(
                 session_id=session_id,
@@ -250,6 +279,7 @@ class ProsodicPipeline:
                 frames_processed=session.frames_processed,
                 timestamp_ms=elapsed_ms,
                 speaker_id=speaker_id,
+                signals=smooth_signals,
             )
             session.last_directive = directive
 

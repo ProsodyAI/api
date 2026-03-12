@@ -222,6 +222,7 @@ async def websocket_realtime(websocket: WebSocket):
                         "arousal": round(directive.arousal, 3),
                         "dominance": round(directive.dominance, 3),
                     },
+                    "signals": {k: round(v, 3) for k, v in directive.signals.items()} if directive.signals else {},
                     "emotion": directive.emotion,
                     "confidence": round(directive.confidence, 3),
                     "text": directive.text,
