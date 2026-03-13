@@ -1,7 +1,7 @@
 """
 Client for the ProsodySSM model service.
 
-Supports Baseten dedicated deployments (recommended) and optional Vertex AI.
+Supports dedicated model deployments and optional Vertex AI.
 """
 
 import asyncio
@@ -41,11 +41,14 @@ class ModelPrediction:
     # Raw prosodic features (for advanced use)
     prosody_features: Optional[dict[str, float]] = None
 
+    # Interpreted prosodic signals from the SSM hidden state
+    signals: Optional[dict[str, float]] = None
+
 
 class ModelServiceClient:
     """
     Client for a ProsodySSM model service (direct URL or Vertex AI).
-    For new deployments, use Baseten via BasetenClient (get_model_client() selects it when credentials are set).
+    get_model_client() returns the dedicated client when model credentials are set.
     """
 
     def __init__(
@@ -295,13 +298,8 @@ class VertexAIClient(ModelServiceClient):
         return self._parse_response(prediction_data)
 
 
-class BasetenClient(ModelServiceClient):
-    """
-    Client for ProsodySSM deployed on Baseten (dedicated endpoint).
-
-    Uses https://model-{model_id}.api.baseten.co/environments/{deployment}/predict
-    with Authorization: Api-Key {key}.
-    """
+class ProsodyClient(ModelServiceClient):
+    """Client for ProsodySSM dedicated endpoint (model ID + API key)."""
 
     def __init__(
         self,
@@ -332,10 +330,9 @@ class BasetenClient(ModelServiceClient):
         return self._client
 
     def _parse_response(self, data: dict[str, Any]) -> ModelPrediction:
-        """Parse Baseten model response (emotion + VAD only; no ASR)."""
+        """Parse model response (emotion + VAD only; no ASR)."""
         if "error" in data:
             raise ValueError(data["error"])
-        # Baseten deploy returns emotion, confidence, emotion_probabilities, valence, arousal, dominance
         return ModelPrediction(
             text="",
             language="en",
@@ -351,6 +348,7 @@ class BasetenClient(ModelServiceClient):
             intensity=None,
             tempo=None,
             prosody_features=None,
+            signals=data.get("signals"),
         )
 
 
@@ -359,13 +357,12 @@ _model_client: Optional[ModelServiceClient] = None
 
 
 def get_model_client() -> ModelServiceClient:
-    """Get or create the model client instance. Prefers Baseten when credentials are set."""
+    """Get or create the model client instance. Uses dedicated client when credentials are set."""
     global _model_client
 
     if _model_client is None:
-        use_baseten = bool(settings.model_id and settings.model_api_key)
-        if use_baseten:
-            _model_client = BasetenClient()
+        if settings.model_id and settings.model_api_key:
+            _model_client = ProsodyClient()
         elif settings.use_vertex_ai:
             _model_client = VertexAIClient()
         else:

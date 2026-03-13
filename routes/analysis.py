@@ -16,14 +16,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-logger = logging.getLogger(__name__)
-
+from client import ModelPrediction, get_model_client
 from config import settings
 from db import create_session
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from kpi_predictor import ProsodySignals, get_kpi_predictor
 from kpis import get_kpi_loader
-from model_client import ModelPrediction, get_model_client
 from schemas import (
     AnalysisRequest,
     AnalysisResponse,
@@ -34,6 +32,7 @@ from schemas import (
 )
 from storage import get_org_slug, upload_audio, upload_transcript
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------

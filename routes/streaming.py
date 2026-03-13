@@ -222,12 +222,16 @@ async def websocket_realtime(websocket: WebSocket):
                         "arousal": round(directive.arousal, 3),
                         "dominance": round(directive.dominance, 3),
                     },
+                    "signals": {k: round(v, 3) for k, v in directive.signals.items()} if directive.signals else {},
                     "emotion": directive.emotion,
                     "confidence": round(directive.confidence, 3),
                     "text": directive.text,
                     "frames_processed": directive.frames_processed,
                     "timestamp_ms": directive.timestamp_ms,
                     "speaker_id": directive.speaker_id,
+                    "phonemes": getattr(directive, "phonemes", []) or [],
+                    "ipa_transcript": getattr(directive, "ipa_transcript", "") or "",
+                    "prosody_embedding": getattr(directive, "prosody_embedding", None),
                 }
 
                 if client_kpis:

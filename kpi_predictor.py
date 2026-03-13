@@ -173,7 +173,7 @@ class ProsodySignals:
     @classmethod
     def from_model_prediction(cls, prediction) -> "ProsodySignals":
         """
-        Build from a ModelPrediction (model_client.ModelPrediction).
+        Build from a ModelPrediction (client.ModelPrediction).
 
         Extracts all available prosodic features — NO emotion fields.
         """

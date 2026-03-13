@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
-    # Model inference (Baseten under the hood; env vars are ProsodyAI-only)
+    # Model inference (env vars are ProsodyAI-only)
     service_timeout: float = 60.0
     service_api_key: Optional[str] = None  # Optional auth for direct service_url (legacy)
 
