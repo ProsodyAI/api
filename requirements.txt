@@ -1,6 +1,7 @@
 # ProsodyAI API - production deps only (inference via Baseten; features + streaming in-repo)
 fastapi>=0.104.0
 librosa>=0.10.0
+phonemizer>=3.2.0  # IPA phonemes (requires espeak-ng system package)
 resemblyzer>=0.1.0  # speaker embeddings for agent vs caller / multi-speaker
 scipy>=1.11.0
 soundfile>=0.12.0

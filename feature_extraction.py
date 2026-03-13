@@ -320,10 +320,7 @@ class ProsodyFeatureExtractor:
 
 class PhoneticFeatureExtractor:
     """
-    Extract phonetic/phoneme-level features from text or audio.
-
-    Uses phonemizer for text-to-phoneme conversion when available;
-    otherwise falls back to a simple approximation.
+    Extract phonetic/phoneme-level features from text. Requires phonemizer and espeak-ng (IPA).
     """
 
     # IPA vowels and consonants for feature computation
@@ -333,81 +330,41 @@ class PhoneticFeatureExtractor:
     def __init__(self, language: str = "en-us", backend: str = "espeak"):
         self.language = language
         self.backend = backend
-        self._phonemizer = None
+        self._phonemize_fn = None
+        self._separator = None
 
-    def _get_phonemizer(self):
-        """Lazy-load phonemizer to avoid import issues if not installed."""
-        if self._phonemizer is None:
-            try:
-                from phonemizer import phonemize
-                from phonemizer.separator import Separator
-                self._phonemize_fn = phonemize
-                self._separator = Separator(phone=' ', word='|', syllable='-')
-            except ImportError:
-                self._phonemize_fn = None
-                self._separator = None
-        return self._phonemize_fn
+    def _ensure_phonemizer(self):
+        """Require phonemizer and espeak. Raises ImportError if not available."""
+        if self._phonemize_fn is None:
+            from phonemizer import phonemize
+            from phonemizer.separator import Separator
+            self._phonemize_fn = phonemize
+            self._separator = Separator(phone=' ', word='|', syllable='-')
 
     def extract_from_text(self, text: str) -> PhoneticFeatures:
-        """Extract phonetic features from text."""
+        """Extract phonetic features from text. Uses espeak for IPA; no fallback."""
         features = PhoneticFeatures()
-
-        phonemize_fn = self._get_phonemizer()
-
-        if phonemize_fn is not None:
-            try:
-                phoneme_str = phonemize_fn(
-                    text,
-                    language=self.language,
-                    backend=self.backend,
-                    separator=self._separator,
-                    strip=True,
-                )
-                features.phonemes = phoneme_str.split()
-            except Exception:
-                features.phonemes = self._simple_phonemize(text)
-        else:
-            features.phonemes = self._simple_phonemize(text)
-
-        # Compute phoneme statistics
+        if not text or not text.strip():
+            return features
+        self._ensure_phonemizer()
+        phoneme_str = self._phonemize_fn(
+            text.strip(),
+            language=self.language,
+            backend=self.backend,
+            separator=self._separator,
+            strip=True,
+        )
+        features.phonemes = phoneme_str.split()
         if features.phonemes:
             total = len(features.phonemes)
             vowel_count = sum(1 for p in features.phonemes if any(c in self.VOWELS for c in p))
             consonant_count = sum(1 for p in features.phonemes if any(c in self.CONSONANTS for c in p))
-
             features.vowel_ratio = vowel_count / total
             features.consonant_ratio = consonant_count / total
-
             features.stressed_syllable_count = sum(
                 1 for p in features.phonemes if 'ˈ' in p or "'" in p
             )
-
         return features
-
-    def _simple_phonemize(self, text: str) -> list[str]:
-        """Simple fallback phonemization without external dependencies."""
-        phonemes = []
-        text = text.lower()
-
-        i = 0
-        while i < len(text):
-            char = text[i]
-
-            if i < len(text) - 1:
-                digraph = text[i:i+2]
-                if digraph in ('th', 'sh', 'ch', 'ng', 'wh'):
-                    phonemes.append(digraph)
-                    i += 2
-                    continue
-
-            if char.isalpha():
-                phonemes.append(char)
-            elif char == ' ':
-                phonemes.append('|')
-
-            i += 1
-
-        return phonemes
 
     def extract_with_alignments(
         self,

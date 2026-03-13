@@ -10,8 +10,12 @@ import base64
 import logging
 import struct
 import time
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+import numpy as np
 
 from kpi_predictor import ProsodySignals
 from streaming.speaker_utils import assign_speaker, get_embedding
@@ -44,6 +48,10 @@ class AgentDirective:
     timestamp_ms: int = 0
     speaker_id: str = "unknown"  # "agent" | "caller" | "speaker_0" | "speaker_1" | ...
     signals: dict[str, float] = field(default_factory=dict)
+    # Phoneme and prosodic embeddings (from same chunk)
+    phonemes: list[str] = field(default_factory=list)
+    ipa_transcript: str = ""  # Space-separated IPA phonemes (from phonemizer when available)
+    prosody_embedding: Optional[dict] = None  # mfcc_means, f0_contour, energy_contour (downsampled)
 
 
 def _ema(alpha: float, raw: float, prev: Optional[float]) -> float:
@@ -113,6 +121,54 @@ def _rms(pcm: bytes) -> float:
 
 
 TRANSCRIPT_PROMPT_MAX_CHARS = 224  # Whisper prompt limit (for context continuity)
+
+# Max points in contour arrays sent to client (downsample to keep payload small)
+PROSODY_CONTOUR_POINTS = 32
+
+
+def _extract_phonemes_and_prosody(text: str, wav_bytes: bytes) -> tuple[list[str], str, Optional[dict]]:
+    """Extract phonemes from text and prosodic embedding from audio. Returns (phonemes, ipa_transcript, prosody_embedding)."""
+    phonemes: list[str] = []
+    ipa_transcript = ""
+    prosody_embedding: Optional[dict] = None
+    try:
+        if text and text.strip():
+            from routes.features import get_phonetic_extractor
+            ext = get_phonetic_extractor()
+            feats = ext.extract_from_text(text.strip())
+            phonemes = feats.phonemes or []
+            ipa_transcript = " ".join(phonemes) if phonemes else ""
+    except Exception:
+        pass
+    try:
+        import io
+        import soundfile as sf
+        from routes.features import get_prosody_extractor
+        audio, sr = sf.read(io.BytesIO(wav_bytes))
+        ext = get_prosody_extractor()
+        pf = ext.extract(audio, sr)
+        # Build embedding dict: mfcc_means (13-d) + downsampled contours
+        def downsample(arr: "np.ndarray", n: int) -> list[float]:
+            if arr is None or len(arr) == 0:
+                return []
+            a = np.asarray(arr)
+            if len(a) <= n:
+                return a.tolist()
+            indices = np.linspace(0, len(a) - 1, n, dtype=int)
+            return a[indices].tolist()
+        prosody_embedding = {
+            "mfcc_means": pf.mfcc_means.tolist() if hasattr(pf.mfcc_means, "tolist") else list(pf.mfcc_means),
+            "f0_contour": downsample(pf.f0_contour, PROSODY_CONTOUR_POINTS),
+            "energy_contour": downsample(pf.energy_contour, PROSODY_CONTOUR_POINTS),
+            "f0_mean": pf.f0_mean,
+            "f0_std": pf.f0_std,
+            "energy_mean": pf.energy_mean,
+            "energy_std": pf.energy_std,
+        }
+    except Exception:
+        pass
+    return phonemes, ipa_transcript, prosody_embedding
+
 
 async def _transcribe_chunk(wav_bytes: bytes, language: str = "en", prompt: Optional[str] = None) -> str:
     """Transcribe a WAV chunk using OpenAI Whisper API."""
@@ -261,6 +317,9 @@ class ProsodicPipeline:
             session.frames_processed += 1
             elapsed_ms = int((time.time() - session.start_time) * 1000)
 
+            # Phonemes (from transcript) and prosodic embedding (from this chunk's audio)
+            phonemes, ipa_transcript, prosody_embedding = _extract_phonemes_and_prosody(pred.text or "", wav)
+
             prosody_signals = ProsodySignals(
                 valence=smooth_valence,
                 arousal=smooth_arousal,
@@ -280,6 +339,9 @@ class ProsodicPipeline:
                 timestamp_ms=elapsed_ms,
                 speaker_id=speaker_id,
                 signals=smooth_signals,
+                phonemes=phonemes,
+                ipa_transcript=ipa_transcript,
+                prosody_embedding=prosody_embedding,
             )
             session.last_directive = directive
 
