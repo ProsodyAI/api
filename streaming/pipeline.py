@@ -4,19 +4,17 @@ ProsodySSM streaming pipeline.
 Accumulates PCM audio, sends 1-second chunks to the deployed model for
 inference, returns VAD scores + emotion + confidence as directives.
 """
+from __future__ import annotations
 
 import asyncio
 import base64
 import logging
 import struct
 import time
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
-
 from kpi_predictor import ProsodySignals
 from streaming.speaker_utils import assign_speaker, get_embedding
 
@@ -142,8 +140,10 @@ def _extract_phonemes_and_prosody(text: str, wav_bytes: bytes) -> tuple[list[str
         pass
     try:
         import io
+
         import soundfile as sf
         from routes.features import get_prosody_extractor
+
         audio, sr = sf.read(io.BytesIO(wav_bytes))
         ext = get_prosody_extractor()
         pf = ext.extract(audio, sr)
