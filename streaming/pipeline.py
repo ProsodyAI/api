@@ -47,6 +47,7 @@ class AgentDirective:
     timestamp_ms: int = 0
     speaker_id: str = "unknown"  # "agent" | "caller" | "speaker_0" | "speaker_1" | ...
     signals: dict[str, float] = field(default_factory=dict)
+    sequence_signals: dict[str, float] = field(default_factory=dict)
     # Phoneme and prosodic embeddings (from same chunk)
     phonemes: list[str] = field(default_factory=list)
     ipa_transcript: str = ""  # Space-separated IPA phonemes (from phonemizer when available)
@@ -389,6 +390,7 @@ class ProsodicPipeline:
                 timestamp_ms=elapsed_ms,
                 speaker_id=speaker_id,
                 signals=smooth_signals,
+                sequence_signals=pred.sequence_signals or {},
                 phonemes=phonemes,
                 ipa_transcript=ipa_transcript,
                 prosody_embedding=prosody_embedding,

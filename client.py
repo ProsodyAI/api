@@ -44,6 +44,9 @@ class ModelPrediction:
     # Interpreted prosodic signals from the SSM hidden state
     signals: Optional[dict[str, float]] = None
 
+    # Sequence-level signals (pooled from per-frame heads)
+    sequence_signals: Optional[dict[str, float]] = None
+
 
 class ModelServiceClient:
     """
@@ -349,6 +352,7 @@ class ProsodyClient(ModelServiceClient):
             tempo=None,
             prosody_features=None,
             signals=data.get("signals"),
+            sequence_signals=data.get("sequence_signals"),
         )
 
 

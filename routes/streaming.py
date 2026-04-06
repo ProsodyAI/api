@@ -229,6 +229,7 @@ async def websocket_realtime(websocket: WebSocket):
                     "phonemes": getattr(directive, "phonemes", []) or [],
                     "ipa_transcript": getattr(directive, "ipa_transcript", "") or "",
                     "prosody_embedding": getattr(directive, "prosody_embedding", None),
+                    "sequence_signals": {k: round(v, 3) for k, v in directive.sequence_signals.items()} if directive.sequence_signals else {},
                 }
 
                 if client_kpis:
