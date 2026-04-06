@@ -11,7 +11,8 @@ import base64
 import logging
 import struct
 import time
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -52,6 +53,36 @@ class AgentDirective:
     prosody_embedding: Optional[dict] = None  # mfcc_means, f0_contour, energy_contour (downsampled)
 
 
+@dataclass
+class TranscriptSegment:
+    """One chunk in the aligned transcript."""
+    start_ms: int
+    end_ms: int
+    text: str
+    speaker_id: str
+    emotion: str
+    confidence: float
+    valence: float
+    arousal: float
+    dominance: float
+    signals: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class TranscriptTurn:
+    """Consecutive segments from the same speaker, merged into a turn."""
+    start_ms: int
+    end_ms: int
+    speaker_id: str
+    text: str
+    segments: list[TranscriptSegment]
+    avg_valence: float
+    avg_arousal: float
+    avg_dominance: float
+    dominant_emotion: str
+    avg_confidence: float
+
+
 def _ema(alpha: float, raw: float, prev: Optional[float]) -> float:
     """Exponential moving average. Returns raw if prev is None."""
     if prev is None:
@@ -86,6 +117,7 @@ class PipelineSession:
     audio_buffer: bytearray = field(default_factory=bytearray)
     all_audio: bytearray = field(default_factory=bytearray)
     prosody_history: list[ProsodySignals] = field(default_factory=list)
+    segments: list[TranscriptSegment] = field(default_factory=list)
     frames_processed: int = 0
     start_time: float = field(default_factory=time.time)
     last_directive: Optional[AgentDirective] = None
@@ -201,6 +233,24 @@ async def _transcribe_chunk(wav_bytes: bytes, language: str = "en", prompt: Opti
         )
         resp.raise_for_status()
         return resp.text.strip()
+
+
+def _merge_segments(group: list[TranscriptSegment]) -> TranscriptTurn:
+    """Collapse a list of same-speaker segments into a single turn."""
+    n = len(group)
+    emotions = Counter(s.emotion for s in group)
+    return TranscriptTurn(
+        start_ms=group[0].start_ms,
+        end_ms=group[-1].end_ms,
+        speaker_id=group[0].speaker_id,
+        text=" ".join(s.text for s in group if s.text).strip(),
+        segments=list(group),
+        avg_valence=round(sum(s.valence for s in group) / n, 3),
+        avg_arousal=round(sum(s.arousal for s in group) / n, 3),
+        avg_dominance=round(sum(s.dominance for s in group) / n, 3),
+        dominant_emotion=emotions.most_common(1)[0][0],
+        avg_confidence=round(sum(s.confidence for s in group) / n, 3),
+    )
 
 
 class ProsodicPipeline:
@@ -345,6 +395,20 @@ class ProsodicPipeline:
             )
             session.last_directive = directive
 
+            chunk_start_ms = (session.frames_processed - 1) * CHUNK_SECONDS * 1000
+            session.segments.append(TranscriptSegment(
+                start_ms=chunk_start_ms,
+                end_ms=chunk_start_ms + CHUNK_SECONDS * 1000,
+                text=pred.text or "",
+                speaker_id=speaker_id,
+                emotion=smooth_emotion,
+                confidence=round(smooth_confidence, 3),
+                valence=round(smooth_valence, 3),
+                arousal=round(smooth_arousal, 3),
+                dominance=round(smooth_dominance, 3),
+                signals={k: round(v, 3) for k, v in smooth_signals.items()},
+            ))
+
             logger.info(
                 f"Session {session_id}: {smooth_emotion} ({smooth_confidence:.2f}) speaker={speaker_id} "
                 f"v={smooth_valence:.2f} a={smooth_arousal:.2f} d={smooth_dominance:.2f}"
@@ -370,6 +434,35 @@ class ProsodicPipeline:
     def get_prosody_history(self, session_id: str) -> list[ProsodySignals]:
         session = self._sessions.get(session_id)
         return session.prosody_history if session else []
+
+    def get_aligned_transcript(self, session_id: str) -> list[TranscriptSegment]:
+        session = self._sessions.get(session_id)
+        return list(session.segments) if session else []
+
+    def get_turns(self, session_id: str) -> list[TranscriptTurn]:
+        """Merge consecutive same-speaker segments into turns."""
+        segments = self.get_aligned_transcript(session_id)
+        if not segments:
+            return []
+        turns: list[TranscriptTurn] = []
+        group: list[TranscriptSegment] = [segments[0]]
+        for seg in segments[1:]:
+            if seg.speaker_id == group[-1].speaker_id:
+                group.append(seg)
+            else:
+                turns.append(_merge_segments(group))
+                group = [seg]
+        turns.append(_merge_segments(group))
+        return turns
+
+    def get_session_transcript_dict(self, session_id: str, duration_seconds: float = 0.0) -> dict:
+        """Full aligned transcript as a JSON-serializable dict."""
+        return {
+            "session_id": session_id,
+            "duration_seconds": round(duration_seconds, 1),
+            "turns": [asdict(t) for t in self.get_turns(session_id)],
+            "segments": [asdict(s) for s in self.get_aligned_transcript(session_id)],
+        }
 
     def get_all_audio(self, session_id: str) -> bytes:
         session = self._sessions.get(session_id)

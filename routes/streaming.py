@@ -69,7 +69,7 @@ async def _broadcast(session_id: str, data: dict):
 
 
 def _flush_to_gcs(org_slug, org_bucket, session_id, pipeline):
-    """Store session audio + transcript to GCS."""
+    """Store session audio + aligned transcript to GCS."""
     if not org_slug:
         return
     audio = pipeline.get_all_audio(session_id)
@@ -81,21 +81,14 @@ def _flush_to_gcs(org_slug, org_bucket, session_id, pipeline):
         wav = _pcm_to_wav(audio)
         upload_audio(org_slug, session_id, wav, org_storage_bucket=org_bucket)
 
-        session = pipeline.get_session(session_id)
-        transcript = {
-            "session_id": session_id,
-            "frames": len(history),
-            "duration_seconds": round(len(audio) / (STREAMING_SAMPLE_RATE * 2), 1),
-            "prosody_summary": {
-                "avg_valence": round(sum(s.valence for s in history) / len(history), 3) if history else 0,
-                "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3) if history else 0,
-                "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3) if history else 0,
-            },
+        duration_seconds = len(audio) / (STREAMING_SAMPLE_RATE * 2)
+        transcript = pipeline.get_session_transcript_dict(session_id, duration_seconds)
+        transcript["frames"] = len(history)
+        transcript["prosody_summary"] = {
+            "avg_valence": round(sum(s.valence for s in history) / len(history), 3) if history else 0,
+            "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3) if history else 0,
+            "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3) if history else 0,
         }
-        if session and session.last_directive:
-            transcript["last_emotion"] = session.last_directive.emotion
-            transcript["last_confidence"] = session.last_directive.confidence
-            transcript["text"] = session.last_directive.text
 
         upload_transcript(org_slug, session_id, transcript, org_storage_bucket=org_bucket)
         logger.info(f"Session {session_id}: flushed to GCS ({org_slug})")
@@ -191,10 +184,14 @@ async def websocket_realtime(websocket: WebSocket):
                 elif msg_type == "end":
                     _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
                     session = pipeline.get_session(session_id)
+                    audio = pipeline.get_all_audio(session_id)
+                    duration_s = len(audio) / (STREAMING_SAMPLE_RATE * 2) if audio else 0
+                    transcript = pipeline.get_session_transcript_dict(session_id, duration_s)
                     await websocket.send_json({
                         "type": "session_end",
                         "session_id": session_id,
                         "frames_processed": session.frames_processed if session else 0,
+                        "transcript": transcript,
                     })
                     break
 
