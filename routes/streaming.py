@@ -161,10 +161,18 @@ async def websocket_realtime(websocket: WebSocket):
                             await websocket.close(code=4001)
                             return
 
+                    # Audio format config for phone/telephony sources
+                    audio_sr = int(msg.get("sample_rate", 16000))
+                    audio_enc = str(msg.get("encoding", "pcm16"))
+                    if audio_enc not in ("pcm16", "mulaw", "alaw"):
+                        audio_enc = "pcm16"
+                    pipeline.configure_session(session_id, sample_rate=audio_sr, encoding=audio_enc)
+
                     await websocket.send_json({
                         "type": "config_ack",
                         "session_id": session_id,
                         "kpis_loaded": len(client_kpis),
+                        "audio_config": {"sample_rate": audio_sr, "encoding": audio_enc},
                     })
                     continue
 

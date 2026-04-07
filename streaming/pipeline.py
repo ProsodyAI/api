@@ -26,8 +26,8 @@ TARGET_SAMPLE_RATE = 16000
 CHUNK_BYTES = TARGET_SAMPLE_RATE * 2 * CHUNK_SECONDS  # 2 seconds at 16kHz mono int16
 INFERENCE_TIMEOUT = 10.0
 VAD_RMS_THRESHOLD = 200
-# Peak normalize to this fraction of int16 range so phone (quiet) and mic (loud) are comparable
-NORMALIZE_PEAK = 0.9
+VAD_RMS_THRESHOLD_AFTER_NORM = 3000  # threshold after peak normalization
+NORMALIZE_PEAK = 0.9  # target peak as fraction of int16 range
 
 # Temporal smoothing: EMA factor (higher = more weight on new frame, less smoothing)
 SMOOTH_ALPHA = 0.6  # Higher = more responsive; with 2s chunks we need less smoothing
@@ -122,6 +122,9 @@ class PipelineSession:
     frames_processed: int = 0
     start_time: float = field(default_factory=time.time)
     last_directive: Optional[AgentDirective] = None
+    # Audio format config (set from WebSocket config message)
+    input_sample_rate: int = 16000
+    input_encoding: str = "pcm16"  # "pcm16" | "mulaw" | "alaw"
     # Temporal smoothing state (EMA of last output)
     _smooth_valence: Optional[float] = None
     _smooth_arousal: Optional[float] = None
@@ -134,6 +137,97 @@ class PipelineSession:
     _speaker_centroids: Any = None  # list of (label, np.ndarray) for multi-speaker clustering
     # Previous transcript (used as Whisper prompt for continuity)
     last_transcript: str = ""
+
+
+def _decode_mulaw(data: bytes) -> bytes:
+    """Decode G.711 μ-law to 16-bit linear PCM."""
+    MULAW_BIAS = 33
+    MULAW_MAX = 0x1FFF
+    out = bytearray(len(data) * 2)
+    for i, byte in enumerate(data):
+        byte = ~byte & 0xFF
+        sign = byte & 0x80
+        exponent = (byte >> 4) & 0x07
+        mantissa = byte & 0x0F
+        sample = ((mantissa << 3) + MULAW_BIAS) << exponent
+        sample -= MULAW_BIAS
+        if sign:
+            sample = -sample
+        sample = max(-32768, min(32767, sample))
+        struct.pack_into('<h', out, i * 2, sample)
+    return bytes(out)
+
+
+def _decode_alaw(data: bytes) -> bytes:
+    """Decode G.711 A-law to 16-bit linear PCM."""
+    out = bytearray(len(data) * 2)
+    for i, byte in enumerate(data):
+        byte ^= 0x55
+        sign = byte & 0x80
+        exponent = (byte >> 4) & 0x07
+        mantissa = byte & 0x0F
+        if exponent == 0:
+            sample = (mantissa << 4) + 8
+        else:
+            sample = ((mantissa << 4) + 0x108) << (exponent - 1)
+        if sign:
+            sample = -sample
+        sample = max(-32768, min(32767, sample))
+        struct.pack_into('<h', out, i * 2, sample)
+    return bytes(out)
+
+
+def _resample_pcm(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Resample 16-bit mono PCM via linear interpolation."""
+    if src_rate == dst_rate:
+        return pcm
+    n_samples = len(pcm) // 2
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    ratio = dst_rate / src_rate
+    n_out = int(n_samples * ratio)
+    indices = np.arange(n_out) / ratio
+    indices = np.clip(indices, 0, n_samples - 1)
+    idx_floor = indices.astype(np.int32)
+    idx_ceil = np.minimum(idx_floor + 1, n_samples - 1)
+    frac = indices - idx_floor
+    resampled = samples[idx_floor] * (1 - frac) + samples[idx_ceil] * frac
+    return resampled.astype(np.int16).tobytes()
+
+
+def _peak_normalize(pcm: bytes, target_peak: float = NORMALIZE_PEAK) -> bytes:
+    """Peak-normalize 16-bit PCM so phone (quiet) and mic (loud) audio are comparable."""
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    peak = np.abs(samples).max()
+    if peak < 1.0:
+        return pcm
+    target = target_peak * 32767
+    scale = target / peak
+    normalized = np.clip(samples * scale, -32768, 32767).astype(np.int16)
+    return normalized.tobytes()
+
+
+def preprocess_audio(pcm_data: bytes, sample_rate: int = 16000, encoding: str = "pcm16") -> bytes:
+    """
+    Preprocess incoming audio to 16kHz 16-bit linear PCM, peak-normalized.
+
+    Args:
+        pcm_data: raw audio bytes
+        sample_rate: input sample rate (8000, 16000, etc.)
+        encoding: "pcm16" (default), "mulaw", "alaw"
+
+    Returns:
+        16kHz 16-bit mono PCM bytes, peak-normalized
+    """
+    if encoding == "mulaw":
+        pcm_data = _decode_mulaw(pcm_data)
+    elif encoding == "alaw":
+        pcm_data = _decode_alaw(pcm_data)
+
+    if sample_rate != TARGET_SAMPLE_RATE:
+        pcm_data = _resample_pcm(pcm_data, sample_rate, TARGET_SAMPLE_RATE)
+
+    pcm_data = _peak_normalize(pcm_data)
+    return pcm_data
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
@@ -280,13 +374,33 @@ class ProsodicPipeline:
             self._sessions[session_id] = PipelineSession(session_id=session_id)
         return self._sessions[session_id]
 
+    def configure_session(self, session_id: str, sample_rate: int = 16000, encoding: str = "pcm16"):
+        """Set audio format for a session (call after WebSocket config)."""
+        session = self._get_session(session_id)
+        session.input_sample_rate = sample_rate
+        session.input_encoding = encoding
+        logger.info(f"Session {session_id}: audio config sr={sample_rate} enc={encoding}")
+
     async def process_audio(self, session_id: str, pcm_data: bytes) -> Optional[AgentDirective]:
         """
-        Feed PCM audio into the pipeline. Returns an AgentDirective when
-        enough audio has accumulated and the model returns a result.
-        Returns None if still accumulating or audio is silence.
+        Feed audio into the pipeline. Handles resampling, codec decoding,
+        and peak normalization automatically based on session config.
+
+        Returns an AgentDirective when enough audio has accumulated and
+        the model returns a result. Returns None if still accumulating
+        or audio is silence.
         """
         session = self._get_session(session_id)
+
+        needs_preprocessing = (
+            session.input_sample_rate != TARGET_SAMPLE_RATE
+            or session.input_encoding != "pcm16"
+        )
+        if needs_preprocessing:
+            pcm_data = preprocess_audio(pcm_data, session.input_sample_rate, session.input_encoding)
+        else:
+            pcm_data = _peak_normalize(pcm_data)
+
         session.audio_buffer.extend(pcm_data)
         session.all_audio.extend(pcm_data)
 
@@ -297,7 +411,7 @@ class ProsodicPipeline:
         session.audio_buffer = session.audio_buffer[CHUNK_BYTES:]
 
         rms = _rms(chunk)
-        if rms < VAD_RMS_THRESHOLD:
+        if rms < VAD_RMS_THRESHOLD_AFTER_NORM:
             return None
 
         try:
