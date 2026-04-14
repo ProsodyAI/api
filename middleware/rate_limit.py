@@ -151,8 +151,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             response.headers["X-Plan"] = plan
             return response
 
-        # Check streaming access
-        if request.url.path.startswith("/v1/stream") and not PLAN_FEATURES.get(plan, {}).get("streaming"):
+        # Streaming plan gate: only enforce when the client identifies with an API key on
+        # the handshake. Browser WebSockets cannot set custom headers, so dashboard pages
+        # (admin demo, /observe) and clients that send the key only after connect would
+        # otherwise always get 403. Unauthenticated stream upgrades still use IP-based
+        # daily limits above.
+        if (
+            request.url.path.startswith("/v1/stream")
+            and api_key
+            and not PLAN_FEATURES.get(plan, {}).get("streaming")
+        ):
             return JSONResponse(
                 status_code=403,
                 content={
