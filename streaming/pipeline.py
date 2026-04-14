@@ -142,7 +142,6 @@ class PipelineSession:
 def _decode_mulaw(data: bytes) -> bytes:
     """Decode G.711 μ-law to 16-bit linear PCM."""
     MULAW_BIAS = 33
-    MULAW_MAX = 0x1FFF
     out = bytearray(len(data) * 2)
     for i, byte in enumerate(data):
         byte = ~byte & 0xFF
