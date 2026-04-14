@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from storage import get_org_slug, upload_audio, upload_transcript
 from streaming.pipeline import get_pipeline
 from streaming.session import InMemorySessionStore, SessionState
+from webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ async def websocket_realtime(websocket: WebSocket):
 
     api_key_hash: Optional[str] = None
     client_kpis: list[KPIDefinition] = []
+    org_id: Optional[str] = None
     org_slug: Optional[str] = None
     org_bucket: Optional[str] = None
 
@@ -195,12 +197,20 @@ async def websocket_realtime(websocket: WebSocket):
                     audio = pipeline.get_all_audio(session_id)
                     duration_s = len(audio) / (STREAMING_SAMPLE_RATE * 2) if audio else 0
                     transcript = pipeline.get_session_transcript_dict(session_id, duration_s)
+                    history = pipeline.get_prosody_history(session_id)
+                    prosody_summary = {
+                        "avg_valence": round(sum(s.valence for s in history) / len(history), 3),
+                        "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3),
+                        "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3),
+                    } if history else None
                     await websocket.send_json({
                         "type": "session_end",
                         "session_id": session_id,
                         "frames_processed": session.frames_processed if session else 0,
                         "transcript": transcript,
                     })
+                    if org_id:
+                        asyncio.ensure_future(deliver_webhook(org_id, session_id, transcript, prosody_summary=prosody_summary))
                     break
 
             else:
@@ -258,6 +268,17 @@ async def websocket_realtime(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Session {session_id} disconnected")
         _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
+        if org_id:
+            audio = pipeline.get_all_audio(session_id)
+            duration_s = len(audio) / (STREAMING_SAMPLE_RATE * 2) if audio else 0
+            transcript = pipeline.get_session_transcript_dict(session_id, duration_s)
+            history = pipeline.get_prosody_history(session_id)
+            prosody_summary = {
+                "avg_valence": round(sum(s.valence for s in history) / len(history), 3),
+                "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3),
+                "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3),
+            } if history else None
+            asyncio.ensure_future(deliver_webhook(org_id, session_id, transcript, prosody_summary=prosody_summary))
     except Exception as e:
         logger.error(f"Session {session_id} error: {e}", exc_info=True)
         try:
