@@ -130,14 +130,12 @@ class ModelServiceClient:
             "return_features": True,
         }
 
-        last_exc: Exception | None = None
         for attempt in range(_retries + 1):
             try:
                 response = await self.client.post("predict", json=payload)
                 response.raise_for_status()
                 return self._parse_response(response.json())
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
-                last_exc = exc
                 retryable = isinstance(exc, httpx.TimeoutException) or (
                     isinstance(exc, httpx.HTTPStatusError)
                     and exc.response.status_code in (502, 503, 504)

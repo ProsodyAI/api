@@ -13,7 +13,6 @@ import os
 from typing import Optional
 
 import httpx
-
 from kpis import get_kpi_loader
 
 logger = logging.getLogger(__name__)
