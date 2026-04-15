@@ -332,7 +332,7 @@ class ProsodyClient(ModelServiceClient):
         if self._client is None or self._client.is_closed:
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Api-Key {self.api_key}",
+                "Authorization": f"Bearer {self.api_key}",
             }
             self._client = httpx.AsyncClient(
                 base_url=self.service_url,
