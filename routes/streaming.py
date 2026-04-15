@@ -215,9 +215,12 @@ async def websocket_realtime(websocket: WebSocket):
 
             else:
                 raw = data.get("bytes") or data.get("data")
-                if raw:
+                if not raw:
+                    continue
+                try:
                     directive = await pipeline.process_audio(session_id, raw)
-                else:
+                except Exception as exc:
+                    logger.error(f"Session {session_id}: process_audio crashed: {exc}", exc_info=True)
                     continue
                 if directive is None:
                     continue
