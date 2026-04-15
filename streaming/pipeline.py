@@ -413,30 +413,48 @@ class ProsodicPipeline:
         if rms < VAD_RMS_THRESHOLD_AFTER_NORM:
             return None
 
+        wav = _pcm_to_wav(chunk)
+        b64 = base64.b64encode(wav).decode("utf-8")
+        prompt = session.last_transcript[-TRANSCRIPT_PROMPT_MAX_CHARS:] if session.last_transcript else None
+
+        # Run inference and transcription in parallel.
+        # If the model fails (cold start, timeout, etc.) we still return a
+        # directive with Whisper text and neutral defaults so the client
+        # always gets a response for every voiced chunk.
+        client = self._get_client()
+        model_task = asyncio.ensure_future(asyncio.wait_for(
+            client.predict_from_base64(b64, language="en"),
+            timeout=INFERENCE_TIMEOUT,
+        ))
+        transcribe_task = asyncio.ensure_future(_transcribe_chunk(wav, language="en", prompt=prompt))
+
+        pred: Optional["ModelPrediction"] = None
         try:
-            client = self._get_client()
-            wav = _pcm_to_wav(chunk)
-            b64 = base64.b64encode(wav).decode("utf-8")
-            prompt = session.last_transcript[-TRANSCRIPT_PROMPT_MAX_CHARS:] if session.last_transcript else None
-
-            # Run inference and transcription in parallel so transcript streams every 2s
-            model_task = asyncio.ensure_future(asyncio.wait_for(
-                client.predict_from_base64(b64, language="en"),
-                timeout=INFERENCE_TIMEOUT,
-            ))
-            transcribe_task = asyncio.ensure_future(_transcribe_chunk(wav, language="en", prompt=prompt))
-
             pred = await model_task
-            try:
-                pred.text = await asyncio.wait_for(transcribe_task, timeout=8.0)
-                if pred.text:
-                    session.last_transcript = pred.text
-            except Exception:
-                transcribe_task.cancel()
-                pred.text = ""
+        except Exception as e:
+            logger.error(f"Session {session_id}: model inference failed: {e}")
 
-            # Speaker detection: agent vs caller (if agent_embedding set) or multi-speaker clustering
-            speaker_id = "unknown"
+        transcript_text = ""
+        try:
+            transcript_text = await asyncio.wait_for(transcribe_task, timeout=8.0)
+        except Exception:
+            transcribe_task.cancel()
+
+        if pred is None:
+            from client import ModelPrediction
+            pred = ModelPrediction(
+                text="", language="en", duration=0.0, word_count=0,
+                emotion="neutral", confidence=0.0, emotion_probabilities={"neutral": 1.0},
+                valence=0.0, arousal=0.5, dominance=0.5,
+            )
+
+        pred.text = transcript_text
+        if pred.text:
+            session.last_transcript = pred.text
+
+        # Speaker detection
+        speaker_id = "unknown"
+        try:
             emb = get_embedding(wav)
             if emb is not None:
                 agent_emb = session.agent_embedding
@@ -447,92 +465,88 @@ class ProsodicPipeline:
                     centroids=centroids,
                 )
                 session._speaker_centroids = updated_centroids
+        except Exception:
+            pass
 
-            # Temporal smoothing: EMA over VAD, confidence, and emotion probabilities
-            smooth_probs = _smooth_emotion_probs(
-                SMOOTH_ALPHA,
-                pred.emotion_probabilities or {pred.emotion: pred.confidence},
-                session._smooth_emotion_probs,
-            )
-            session._smooth_emotion_probs = smooth_probs
-            smooth_valence = _ema(SMOOTH_ALPHA, pred.valence, session._smooth_valence)
-            smooth_arousal = _ema(SMOOTH_ALPHA, pred.arousal, session._smooth_arousal)
-            smooth_dominance = _ema(SMOOTH_ALPHA, pred.dominance, session._smooth_dominance)
-            smooth_confidence = _ema(SMOOTH_ALPHA, pred.confidence, session._smooth_confidence)
-            session._smooth_valence = smooth_valence
-            session._smooth_arousal = smooth_arousal
-            session._smooth_dominance = smooth_dominance
-            session._smooth_confidence = smooth_confidence
-            # Smoothed emotion = argmax of smoothed probabilities
-            if smooth_probs:
-                smooth_emotion = max(smooth_probs, key=smooth_probs.get)
-            else:
-                smooth_emotion = pred.emotion
-                smooth_confidence = pred.confidence
+        # Temporal smoothing: EMA over VAD, confidence, and emotion probabilities
+        smooth_probs = _smooth_emotion_probs(
+            SMOOTH_ALPHA,
+            pred.emotion_probabilities or {pred.emotion: pred.confidence},
+            session._smooth_emotion_probs,
+        )
+        session._smooth_emotion_probs = smooth_probs
+        smooth_valence = _ema(SMOOTH_ALPHA, pred.valence, session._smooth_valence)
+        smooth_arousal = _ema(SMOOTH_ALPHA, pred.arousal, session._smooth_arousal)
+        smooth_dominance = _ema(SMOOTH_ALPHA, pred.dominance, session._smooth_dominance)
+        smooth_confidence = _ema(SMOOTH_ALPHA, pred.confidence, session._smooth_confidence)
+        session._smooth_valence = smooth_valence
+        session._smooth_arousal = smooth_arousal
+        session._smooth_dominance = smooth_dominance
+        session._smooth_confidence = smooth_confidence
+        if smooth_probs:
+            smooth_emotion = max(smooth_probs, key=smooth_probs.get)
+        else:
+            smooth_emotion = pred.emotion
+            smooth_confidence = pred.confidence
 
-            # Smooth prosodic signals
-            raw_signals = pred.signals or {}
-            smooth_signals = {}
-            prev_signals = session._smooth_signals or {}
-            for key, val in raw_signals.items():
-                smooth_signals[key] = _ema(SMOOTH_ALPHA, val, prev_signals.get(key))
-            session._smooth_signals = smooth_signals
+        # Smooth prosodic signals
+        raw_signals = pred.signals or {}
+        smooth_signals = {}
+        prev_signals = session._smooth_signals or {}
+        for key, val in raw_signals.items():
+            smooth_signals[key] = _ema(SMOOTH_ALPHA, val, prev_signals.get(key))
+        session._smooth_signals = smooth_signals
 
-            session.frames_processed += 1
-            elapsed_ms = int((time.time() - session.start_time) * 1000)
+        session.frames_processed += 1
+        elapsed_ms = int((time.time() - session.start_time) * 1000)
 
-            # Phonemes (from transcript) and prosodic embedding (from this chunk's audio)
-            phonemes, ipa_transcript, prosody_embedding = _extract_phonemes_and_prosody(pred.text or "", wav)
+        phonemes, ipa_transcript, prosody_embedding = _extract_phonemes_and_prosody(pred.text or "", wav)
 
-            prosody_signals = ProsodySignals(
-                valence=smooth_valence,
-                arousal=smooth_arousal,
-                dominance=smooth_dominance,
-            )
-            session.prosody_history.append(prosody_signals)
+        prosody_signals = ProsodySignals(
+            valence=smooth_valence,
+            arousal=smooth_arousal,
+            dominance=smooth_dominance,
+        )
+        session.prosody_history.append(prosody_signals)
 
-            directive = AgentDirective(
-                session_id=session_id,
-                valence=smooth_valence,
-                arousal=smooth_arousal,
-                dominance=smooth_dominance,
-                emotion=smooth_emotion,
-                confidence=smooth_confidence,
-                text=pred.text,
-                frames_processed=session.frames_processed,
-                timestamp_ms=elapsed_ms,
-                speaker_id=speaker_id,
-                signals=smooth_signals,
-                sequence_signals=pred.sequence_signals or {},
-                phonemes=phonemes,
-                ipa_transcript=ipa_transcript,
-                prosody_embedding=prosody_embedding,
-            )
-            session.last_directive = directive
+        directive = AgentDirective(
+            session_id=session_id,
+            valence=smooth_valence,
+            arousal=smooth_arousal,
+            dominance=smooth_dominance,
+            emotion=smooth_emotion,
+            confidence=smooth_confidence,
+            text=pred.text,
+            frames_processed=session.frames_processed,
+            timestamp_ms=elapsed_ms,
+            speaker_id=speaker_id,
+            signals=smooth_signals,
+            sequence_signals=pred.sequence_signals or {},
+            phonemes=phonemes,
+            ipa_transcript=ipa_transcript,
+            prosody_embedding=prosody_embedding,
+        )
+        session.last_directive = directive
 
-            chunk_start_ms = (session.frames_processed - 1) * CHUNK_SECONDS * 1000
-            session.segments.append(TranscriptSegment(
-                start_ms=chunk_start_ms,
-                end_ms=chunk_start_ms + CHUNK_SECONDS * 1000,
-                text=pred.text or "",
-                speaker_id=speaker_id,
-                emotion=smooth_emotion,
-                confidence=round(smooth_confidence, 3),
-                valence=round(smooth_valence, 3),
-                arousal=round(smooth_arousal, 3),
-                dominance=round(smooth_dominance, 3),
-                signals={k: round(v, 3) for k, v in smooth_signals.items()},
-            ))
+        chunk_start_ms = (session.frames_processed - 1) * CHUNK_SECONDS * 1000
+        session.segments.append(TranscriptSegment(
+            start_ms=chunk_start_ms,
+            end_ms=chunk_start_ms + CHUNK_SECONDS * 1000,
+            text=pred.text or "",
+            speaker_id=speaker_id,
+            emotion=smooth_emotion,
+            confidence=round(smooth_confidence, 3),
+            valence=round(smooth_valence, 3),
+            arousal=round(smooth_arousal, 3),
+            dominance=round(smooth_dominance, 3),
+            signals={k: round(v, 3) for k, v in smooth_signals.items()},
+        ))
 
-            logger.info(
-                f"Session {session_id}: {smooth_emotion} ({smooth_confidence:.2f}) speaker={speaker_id} "
-                f"v={smooth_valence:.2f} a={smooth_arousal:.2f} d={smooth_dominance:.2f}"
-            )
-            return directive
-
-        except Exception as e:
-            print(f"MODEL FAILED: {e}", flush=True)
-            return None
+        logger.info(
+            f"Session {session_id}: {smooth_emotion} ({smooth_confidence:.2f}) speaker={speaker_id} "
+            f"v={smooth_valence:.2f} a={smooth_arousal:.2f} d={smooth_dominance:.2f}"
+        )
+        return directive
 
     def set_agent_embedding_from_audio(self, session_id: str, wav_bytes: bytes) -> bool:
         """Enroll agent voice from reference WAV (16 kHz mono). Enables agent vs caller labeling."""

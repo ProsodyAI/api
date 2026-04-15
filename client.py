@@ -60,8 +60,8 @@ class ModelServiceClient:
         timeout: float = 60.0,
         api_key: Optional[str] = None,
     ):
-        url = (service_url or settings.service_url or "").strip().rstrip("/")
-        self.service_url = url or ("http://localhost:8080" if settings.debug else "")
+        url = (service_url or settings.service_url or "").strip().rstrip("/") + "/"
+        self.service_url = url if url != "/" else ("http://localhost:8080/" if settings.debug else "")
         self.timeout = timeout or settings.service_timeout
         self.api_key = api_key or settings.service_api_key
         self._client: Optional[httpx.AsyncClient] = None
@@ -116,27 +116,38 @@ class ModelServiceClient:
         self,
         audio_base64: str,
         language: str = "en",
+        _retries: int = 2,
     ) -> ModelPrediction:
         """
         Send base64-encoded audio to model service.
 
-        Args:
-            audio_base64: Base64-encoded audio data
-            language: Language code for ASR
-
-        Returns:
-            ModelPrediction with emotion classification
+        Retries on transient HTTP errors (502/503/504, timeouts) so a Baseten
+        cold-start or momentary blip doesn't silently drop the chunk.
         """
         payload = {
             "audio_base64": audio_base64,
             "language": language,
-            "return_features": True,  # Get raw prosody features
+            "return_features": True,
         }
 
-        response = await self.client.post("/predict", json=payload)
-        response.raise_for_status()
-
-        return self._parse_response(response.json())
+        last_exc: Exception | None = None
+        for attempt in range(_retries + 1):
+            try:
+                response = await self.client.post("predict", json=payload)
+                response.raise_for_status()
+                return self._parse_response(response.json())
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                retryable = isinstance(exc, httpx.TimeoutException) or (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code in (502, 503, 504)
+                )
+                if retryable and attempt < _retries:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                raise
+            except Exception:
+                raise
 
     async def predict_from_gcs(
         self,
@@ -159,7 +170,7 @@ class ModelServiceClient:
             "return_features": True,
         }
 
-        response = await self.client.post("/predict", json=payload)
+        response = await self.client.post("predict", json=payload)
         response.raise_for_status()
 
         return self._parse_response(response.json())
@@ -167,7 +178,7 @@ class ModelServiceClient:
     async def health_check(self) -> bool:
         """Check if model service is healthy."""
         try:
-            response = await self.client.get("/health")
+            response = await self.client.get("health")
             return response.status_code == 200
         except Exception:
             return False
