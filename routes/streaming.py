@@ -141,8 +141,10 @@ async def websocket_realtime(websocket: WebSocket):
                     api_key = msg.get("api_key", "")
                     if api_key:
                         try:
-                            validate_api_key(api_key)
                             api_key_hash = _hash_key(api_key)
+                            from middleware.auth import _is_key_in_db
+                            if not (validate_api_key(api_key) or await _is_key_in_db(api_key)):
+                                raise ValueError("invalid key")
                             try:
                                 loader = get_kpi_loader()
                                 client_kpis = await loader.get_kpis_for_api_key(api_key_hash)
