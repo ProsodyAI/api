@@ -421,18 +421,24 @@ class ProsodicPipeline:
         # If the model fails (cold start, timeout, etc.) we still return a
         # directive with Whisper text and neutral defaults so the client
         # always gets a response for every voiced chunk.
-        client = self._get_client()
-        model_task = asyncio.ensure_future(asyncio.wait_for(
-            client.predict_from_base64(b64, language="en"),
-            timeout=INFERENCE_TIMEOUT,
-        ))
-        transcribe_task = asyncio.ensure_future(_transcribe_chunk(wav, language="en", prompt=prompt))
-
         pred: Optional["ModelPrediction"] = None
         try:
-            pred = await model_task
+            client = self._get_client()
+            model_task = asyncio.ensure_future(asyncio.wait_for(
+                client.predict_from_base64(b64, language="en"),
+                timeout=INFERENCE_TIMEOUT,
+            ))
         except Exception as e:
-            logger.error(f"Session {session_id}: model inference failed: {e}")
+            logger.error(f"Session {session_id}: model client init failed: {e}")
+            model_task = None
+
+        transcribe_task = asyncio.ensure_future(_transcribe_chunk(wav, language="en", prompt=prompt))
+
+        if model_task is not None:
+            try:
+                pred = await model_task
+            except Exception as e:
+                logger.error(f"Session {session_id}: model inference failed: {e}")
 
         transcript_text = ""
         try:
