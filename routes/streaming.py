@@ -232,17 +232,22 @@ async def websocket_realtime(websocket: WebSocket):
                     ss.frames_processed = directive.frames_processed
                     await store.set(ss)
 
+                valence = round(directive.valence, 3)
+                arousal = round(directive.arousal, 3)
+                dominance = round(directive.dominance, 3)
+                confidence = round(directive.confidence, 3)
+
                 response = {
                     "type": "directive",
                     "session_id": session_id,
                     "prosody": {
-                        "valence": round(directive.valence, 3),
-                        "arousal": round(directive.arousal, 3),
-                        "dominance": round(directive.dominance, 3),
+                        "valence": valence,
+                        "arousal": arousal,
+                        "dominance": dominance,
                     },
                     "signals": {k: round(v, 3) for k, v in directive.signals.items()} if directive.signals else {},
                     "emotion": directive.emotion,
-                    "confidence": round(directive.confidence, 3),
+                    "confidence": confidence,
                     "text": directive.text,
                     "frames_processed": directive.frames_processed,
                     "timestamp_ms": directive.timestamp_ms,
@@ -251,6 +256,14 @@ async def websocket_realtime(websocket: WebSocket):
                     "ipa_transcript": getattr(directive, "ipa_transcript", "") or "",
                     "prosody_embedding": getattr(directive, "prosody_embedding", None),
                     "sequence_signals": {k: round(v, 3) for k, v in directive.sequence_signals.items()} if directive.sequence_signals else {},
+                    # Flat fields for clients that read top-level (e.g. Aurelia ProsodyTracker)
+                    "current_emotion": directive.emotion,
+                    "emotion_confidence": confidence,
+                    "valence": valence,
+                    "arousal": arousal,
+                    "dominance": dominance,
+                    "tts_emotion": directive.emotion,
+                    "tts_speed": 0.9 if arousal > 0.7 else (1.1 if arousal < 0.3 else 1.0),
                 }
 
                 if client_kpis:
@@ -264,6 +277,19 @@ async def websocket_realtime(websocket: WebSocket):
                     actions = [{"kpi": p.kpi_name, "action": a.action, "expected_impact": round(a.expected_impact, 3)} for p in preds for a in p.recommended_actions]
                     if actions:
                         response["recommended_actions"] = actions
+                    # Map KPI predictions to flat fields for Aurelia-style consumers
+                    for p in preds:
+                        name = (p.kpi_name or "").lower().replace(" ", "_")
+                        if "escalation" in name:
+                            response["escalation_prob"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.0
+                        elif "churn" in name:
+                            response["churn_risk"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.0
+                        elif "csat" in name:
+                            response["predicted_csat"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 3.0
+                        elif "resolution" in name:
+                            response["resolution_prob"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.5
+                        elif "sentiment" in name:
+                            response["sentiment_forecast"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.0
 
                 await websocket.send_json(response)
                 await _broadcast(session_id, response)
