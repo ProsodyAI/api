@@ -7,10 +7,8 @@ with a training_metrics.json file produced by scripts/training/metrics.py.
 
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-
 from routes.admin import require_admin
 
 logger = logging.getLogger(__name__)
