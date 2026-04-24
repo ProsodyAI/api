@@ -8,8 +8,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
+import numbers
 import time
 import uuid
+from dataclasses import asdict, is_dataclass
 from typing import Optional
 
 from config import settings
@@ -43,6 +46,22 @@ def _get_store() -> InMemorySessionStore:
 
 # Observer registry
 _observers: dict[str, list[WebSocket]] = {}
+
+
+def _json_safe(value):
+    """Convert model/feature outputs into strict JSON values for browser WebSocket clients."""
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if hasattr(value, "tolist"):
+        return _json_safe(value.tolist())
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    return value
 
 
 def _add_observer(session_id: str, ws: WebSocket):
@@ -293,8 +312,9 @@ async def websocket_realtime(websocket: WebSocket):
                         elif "sentiment" in name:
                             response["sentiment_forecast"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.0
 
-                await websocket.send_json(response)
-                await _broadcast(session_id, response)
+                safe_response = _json_safe(response)
+                await websocket.send_json(safe_response)
+                await _broadcast(session_id, safe_response)
 
     except WebSocketDisconnect:
         logger.info(f"Session {session_id} disconnected")

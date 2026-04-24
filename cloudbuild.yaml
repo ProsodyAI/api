@@ -40,7 +40,7 @@ steps:
       - '--set-env-vars=DIRECT_DATABASE_URL=${_DIRECT_DATABASE_URL}'
       - '--set-env-vars=PROSODYAI_MODEL_ID=${_MODEL_ID}'
       - '--set-env-vars=PROSODYAI_MODEL_API_KEY=${_MODEL_API_KEY}'
-      - '--set-env-vars=PROSODYAI_CORS_ORIGINS=${_CORS_ORIGINS}'
+      - '--set-env-vars=^|^PROSODYAI_CORS_ORIGINS=${_CORS_ORIGINS}'
       - '--set-env-vars=PROSODYAI_ADMIN_API_KEY=${_ADMIN_API_KEY}'
       - '--set-env-vars=OPENAI_API_KEY=${_OPENAI_API_KEY}'
 
