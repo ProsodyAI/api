@@ -458,10 +458,10 @@ class ProsodicPipeline:
         if pred.text:
             session.last_transcript = pred.text
 
-        # Speaker detection
+        # Speaker detection — run in thread so VoiceEncoder init doesn't block the event loop
         speaker_id = "unknown"
         try:
-            emb = get_embedding(wav)
+            emb = await asyncio.to_thread(get_embedding, wav)
             if emb is not None:
                 agent_emb = session.agent_embedding
                 centroids = session._speaker_centroids
@@ -506,7 +506,10 @@ class ProsodicPipeline:
         session.frames_processed += 1
         elapsed_ms = int((time.time() - session.start_time) * 1000)
 
-        phonemes, ipa_transcript, prosody_embedding = _extract_phonemes_and_prosody(pred.text or "", wav)
+        # Phoneme + prosody embedding extraction — run in thread (librosa/soundfile are CPU-bound)
+        phonemes, ipa_transcript, prosody_embedding = await asyncio.to_thread(
+            _extract_phonemes_and_prosody, pred.text or "", wav
+        )
 
         prosody_signals = ProsodySignals(
             valence=smooth_valence,
