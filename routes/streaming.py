@@ -164,8 +164,9 @@ async def websocket_realtime(websocket: WebSocket):
                 msg_type = msg.get("type", "")
 
                 if msg_type == "config":
-                    if msg.get("session_id"):
-                        session_id = msg["session_id"]
+                    client_session_id = str(msg.get("session_id") or "").strip()
+                    if client_session_id:
+                        session_id = client_session_id
 
                     api_key = msg.get("api_key", "")
                     if api_key:
@@ -178,14 +179,26 @@ async def websocket_realtime(websocket: WebSocket):
                                 loader = get_kpi_loader()
                                 client_kpis = await loader.get_kpis_for_api_key(api_key_hash)
                                 org_id = await loader.get_organization_id(api_key_hash)
-                                if org_id:
-                                    db_sid = await create_session(org_id)
+                                vertical = str(msg.get("vertical") or "").strip() or None
+                                source = str(msg.get("source") or "").strip() or "unknown"
+                                if org_id and not client_session_id:
+                                    db_sid = await create_session(
+                                        org_id,
+                                        metadata={"vertical": vertical, "source": source},
+                                    )
                                     if db_sid:
                                         session_id = db_sid
                                 result = await get_org_slug(api_key_hash)
                                 if result and result[0]:
                                     org_slug, org_bucket = result
-                                ss = SessionState(session_id=session_id, org_id=org_id, org_slug=org_slug)
+                                ss = SessionState(
+                                    session_id=session_id,
+                                    org_id=org_id,
+                                    org_slug=org_slug,
+                                    source=source,
+                                    vertical=vertical,
+                                    api_key=api_key_hash,
+                                )
                                 await store.set(ss)
                             except Exception as e:
                                 logger.warning(f"Session {session_id}: KPI/org load failed: {e}")
@@ -206,6 +219,8 @@ async def websocket_realtime(websocket: WebSocket):
                         "session_id": session_id,
                         "kpis_loaded": len(client_kpis),
                         "audio_config": {"sample_rate": audio_sr, "encoding": audio_enc},
+                        "source": str(msg.get("source") or "").strip() or "unknown",
+                        "vertical": str(msg.get("vertical") or "").strip() or None,
                     })
                     continue
 
@@ -363,6 +378,17 @@ async def websocket_realtime(websocket: WebSocket):
                 except Exception as exc:
                     logger.warning(f"Session {session_id}: modulation update failed: {exc}")
                     modulation, steering_event = None, None
+
+                # Flat top-level fields so consumers don't have to count
+                # categorical emotion labels (which are noisy on borderline
+                # conversational audio — angry/fearful/disgusted all share
+                # high-arousal-negative-valence). Aggregators should count
+                # is_escalating / is_steering here, NOT emotion-label flips.
+                mod_mode = (modulation or {}).get("mode") or "normal"
+                response["modulation_mode"] = mod_mode
+                response["is_escalating"] = mod_mode == "caller_escalating"
+                response["is_agent_overheated"] = mod_mode == "agent_overheated"
+                response["is_steering"] = steering_event is not None
 
                 safe_response = _json_safe(response)
                 await websocket.send_json(safe_response)
