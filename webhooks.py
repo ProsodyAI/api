@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 
 WEBHOOK_TIMEOUT = 10.0
 
-_ENCRYPTION_KEY = os.getenv("INTEGRATION_ENCRYPTION_KEY", "prosody-dev-key-32-bytes-long!!")
+# Treat an unset OR empty env var as "use default" — Cloud Run's
+# --env-vars-file path will inject INTEGRATION_ENCRYPTION_KEY="" when the
+# corresponding GitHub secret hasn't been set yet, and `os.getenv` would
+# happily return that empty string. Falling back to the default keeps
+# existing encrypted Integration rows readable until the rotation runs.
+_ENCRYPTION_KEY = os.getenv("INTEGRATION_ENCRYPTION_KEY") or "prosody-dev-key-32-bytes-long!!"
 
 
 def _decrypt_config(raw_config) -> dict:
