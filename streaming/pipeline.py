@@ -26,8 +26,11 @@ CHUNK_SECONDS = 2
 TARGET_SAMPLE_RATE = 16000
 CHUNK_BYTES = TARGET_SAMPLE_RATE * 2 * CHUNK_SECONDS  # 2 seconds at 16kHz mono int16
 INFERENCE_TIMEOUT = 10.0
-VAD_RMS_THRESHOLD = 200
-VAD_RMS_THRESHOLD_AFTER_NORM = 3000  # threshold after peak normalization
+# VAD is applied to the RAW (un-normalized) chunk so room tone / silence cannot
+# pass through after peak normalization. Real conversational speech easily
+# exceeds these floors; whisper-quiet speech may be borderline by design.
+VAD_RAW_RMS_THRESHOLD = 200      # int16 RMS of the raw chunk
+VAD_RAW_PEAK_THRESHOLD = 1500    # int16 peak of the raw chunk (~ -27 dBFS)
 NORMALIZE_PEAK = 0.9  # target peak as fraction of int16 range
 
 # Temporal smoothing: EMA factor (higher = more weight on new frame, less smoothing)
@@ -113,6 +116,22 @@ def _smooth_emotion_probs(
 
 
 @dataclass
+class ForwardedTranscript:
+    """A transcript segment forwarded by the client (e.g. Aurelia's Deepgram STT).
+
+    When the client has its own STT, it can stream finalized segments here and
+    they'll be attached to whichever 2 s prosody chunk their midpoint falls in,
+    overriding internal Whisper for that chunk. Timestamps are in milliseconds
+    relative to session start (same clock as ``directive.timestamp_ms``).
+    """
+    text: str
+    speaker_id: str = "unknown"
+    start_ms: int = 0
+    end_ms: int = 0
+    consumed: bool = False
+
+
+@dataclass
 class PipelineSession:
     """Per-session state for the pipeline."""
     session_id: str
@@ -138,6 +157,8 @@ class PipelineSession:
     _speaker_centroids: Any = None  # list of (label, np.ndarray) for multi-speaker clustering
     # Previous transcript (used as Whisper prompt for continuity)
     last_transcript: str = ""
+    # Client-forwarded transcripts (BYO STT; overrides Whisper per chunk by midpoint alignment).
+    forwarded_transcripts: list[ForwardedTranscript] = field(default_factory=list)
     # Per-session agent-modulation state (lazy-initialized on first directive).
     modulation_state: Optional[ModulationState] = None
 
@@ -209,8 +230,12 @@ def _peak_normalize(pcm: bytes, target_peak: float = NORMALIZE_PEAK) -> bytes:
 
 
 def preprocess_audio(pcm_data: bytes, sample_rate: int = 16000, encoding: str = "pcm16") -> bytes:
-    """
-    Preprocess incoming audio to 16kHz 16-bit linear PCM, peak-normalized.
+    """Decode + resample incoming audio to 16kHz 16-bit linear PCM.
+
+    Does NOT peak-normalize — peak normalization is applied later, only after
+    the raw VAD gate has confirmed there is voiced audio in the chunk. Doing
+    it earlier amplifies room tone to look loud, which causes Whisper to
+    hallucinate boilerplate ("Thank you for watching", etc.) on silence.
 
     Args:
         pcm_data: raw audio bytes
@@ -218,7 +243,7 @@ def preprocess_audio(pcm_data: bytes, sample_rate: int = 16000, encoding: str = 
         encoding: "pcm16" (default), "mulaw", "alaw"
 
     Returns:
-        16kHz 16-bit mono PCM bytes, peak-normalized
+        16kHz 16-bit mono PCM bytes (raw amplitude preserved).
     """
     if encoding == "mulaw":
         pcm_data = _decode_mulaw(pcm_data)
@@ -228,7 +253,6 @@ def preprocess_audio(pcm_data: bytes, sample_rate: int = 16000, encoding: str = 
     if sample_rate != TARGET_SAMPLE_RATE:
         pcm_data = _resample_pcm(pcm_data, sample_rate, TARGET_SAMPLE_RATE)
 
-    pcm_data = _peak_normalize(pcm_data)
     return pcm_data
 
 
@@ -243,8 +267,19 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
 
 
 def _rms(pcm: bytes) -> float:
-    samples = struct.unpack(f'<{len(pcm)//2}h', pcm)
-    return (sum(s * s for s in samples) / len(samples)) ** 0.5 if samples else 0
+    if not pcm:
+        return 0.0
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    if samples.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(samples * samples)))
+
+
+def _peak(pcm: bytes) -> int:
+    if not pcm:
+        return 0
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    return int(np.abs(samples).max()) if samples.size else 0
 
 
 TRANSCRIPT_PROMPT_MAX_CHARS = 224  # Whisper prompt limit (for context continuity)
@@ -299,8 +334,50 @@ def _extract_phonemes_and_prosody(text: str, wav_bytes: bytes) -> tuple[list[str
     return phonemes, ipa_transcript, prosody_embedding
 
 
+import re as _re_module
+
+# Whisper is known to hallucinate YouTube-style boilerplate when fed
+# borderline-quiet audio. Even with a good VAD gate upstream, occasional
+# borderline chunks slip through (a single "uh", a breath, a click). This
+# blocklist suppresses the most common ones at the transcription boundary.
+# Patterns are matched against the lowercased, punctuation-stripped output.
+_HALLUCINATION_PATTERNS = (
+    _re_module.compile(r"^thank(s)?\s+(you\s+)?(for\s+watching|so\s+much\s+for\s+watching)$"),
+    _re_module.compile(r"^thank(s)?\s+you$"),
+    _re_module.compile(r"^bye+$"),
+    _re_module.compile(r"^you$"),
+    _re_module.compile(r"^pewdiepie$"),
+    _re_module.compile(r"^(please\s+)?subscribe(\s+to\s+(my|the)\s+channel)?$"),
+    _re_module.compile(r"^like\s+and\s+subscribe$"),
+    _re_module.compile(r"^(don'?t\s+forget\s+to\s+)?like\s+(and\s+)?subscribe$"),
+    _re_module.compile(r"^see\s+you\s+(in\s+)?(the\s+)?next\s+(video|one|time)$"),
+    _re_module.compile(r"^(this\s+is\s+)?(the\s+)?end$"),
+    _re_module.compile(r"^subtitles?\s+(by|created)\b.*$"),
+    _re_module.compile(r"^captions?\s+(by|created)\b.*$"),
+    _re_module.compile(r"^\(?\s*(applause|music|silence|laughter)\s*\)?$"),
+    _re_module.compile(r"^(\u266a|\u266b|♪|♫)+$"),
+)
+
+
+def _is_whisper_hallucination(text: str) -> bool:
+    if not text:
+        return False
+    normalized = _re_module.sub(r"[^\w\s'\u266a\u266b]", " ", text.strip().lower()).strip()
+    normalized = _re_module.sub(r"\s+", " ", normalized)
+    if not normalized:
+        return True
+    for pat in _HALLUCINATION_PATTERNS:
+        if pat.match(normalized):
+            return True
+    return False
+
+
 async def _transcribe_chunk(wav_bytes: bytes, language: str = "en", prompt: Optional[str] = None) -> str:
-    """Transcribe a WAV chunk using OpenAI Whisper API."""
+    """Transcribe a WAV chunk using OpenAI Whisper API.
+
+    Returns an empty string for known hallucination patterns so the live
+    transcript doesn't fill with "Thank you for watching" and friends.
+    """
     import os
 
     import httpx
@@ -329,7 +406,11 @@ async def _transcribe_chunk(wav_bytes: bytes, language: str = "en", prompt: Opti
             data=data,
         )
         resp.raise_for_status()
-        return resp.text.strip()
+        text = resp.text.strip()
+        if _is_whisper_hallucination(text):
+            logger.info("Suppressed likely Whisper hallucination: %r", text)
+            return ""
+        return text
 
 
 def _merge_segments(group: list[TranscriptSegment]) -> TranscriptTurn:
@@ -400,8 +481,6 @@ class ProsodicPipeline:
         )
         if needs_preprocessing:
             pcm_data = preprocess_audio(pcm_data, session.input_sample_rate, session.input_encoding)
-        else:
-            pcm_data = _peak_normalize(pcm_data)
 
         session.audio_buffer.extend(pcm_data)
         session.all_audio.extend(pcm_data)
@@ -409,12 +488,19 @@ class ProsodicPipeline:
         if len(session.audio_buffer) < CHUNK_BYTES:
             return None
 
-        chunk = bytes(session.audio_buffer[:CHUNK_BYTES])
+        raw_chunk = bytes(session.audio_buffer[:CHUNK_BYTES])
         session.audio_buffer = session.audio_buffer[CHUNK_BYTES:]
 
-        rms = _rms(chunk)
-        if rms < VAD_RMS_THRESHOLD_AFTER_NORM:
+        # Voice-activity gate on the RAW chunk. If we normalized first, room
+        # tone gets amplified to look loud and Whisper hallucinates boilerplate
+        # (PewDiePie, "thank you for watching", subscribe-spam) on silence.
+        if _peak(raw_chunk) < VAD_RAW_PEAK_THRESHOLD:
             return None
+        if _rms(raw_chunk) < VAD_RAW_RMS_THRESHOLD:
+            return None
+
+        # Only normalize voiced chunks for downstream model + Whisper.
+        chunk = _peak_normalize(raw_chunk)
 
         wav = _pcm_to_wav(chunk)
         b64 = base64.b64encode(wav).decode("utf-8")
@@ -476,6 +562,28 @@ class ProsodicPipeline:
                 session._speaker_centroids = updated_centroids
         except Exception:
             pass
+
+        # Client-forwarded transcripts (e.g. Aurelia's Deepgram STT) override Whisper
+        # for any chunk whose 2 s window contains the transcript's midpoint.
+        chunk_idx = session.frames_processed  # current chunk, pre-increment
+        chunk_start_ms = chunk_idx * CHUNK_SECONDS * 1000
+        chunk_end_ms = chunk_start_ms + CHUNK_SECONDS * 1000
+        forwarded_for_chunk: list[ForwardedTranscript] = []
+        for t in session.forwarded_transcripts:
+            if t.consumed:
+                continue
+            mid_ms = (t.start_ms + t.end_ms) / 2 if t.end_ms > t.start_ms else t.start_ms
+            if chunk_start_ms <= mid_ms < chunk_end_ms:
+                forwarded_for_chunk.append(t)
+                t.consumed = True
+        if forwarded_for_chunk:
+            forwarded_text = " ".join(t.text for t in forwarded_for_chunk if t.text).strip()
+            if forwarded_text:
+                pred.text = forwarded_text
+                session.last_transcript = forwarded_text
+            last_label = forwarded_for_chunk[-1].speaker_id
+            if last_label and last_label != "unknown":
+                speaker_id = last_label
 
         # Temporal smoothing: EMA over VAD, confidence, and emotion probabilities
         smooth_probs = _smooth_emotion_probs(
@@ -568,6 +676,35 @@ class ProsodicPipeline:
         session = self._get_session(session_id)
         session.agent_embedding = emb
         return True
+
+    def add_forwarded_transcript(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        speaker_id: str = "unknown",
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> None:
+        """Buffer a client-forwarded transcript.
+
+        It will be attached to whichever 2 s prosody chunk its midpoint falls in
+        (overriding Whisper for that chunk). Used by clients with their own STT
+        (e.g. Aurelia's Deepgram via LiveKit). Timestamps are ms relative to
+        session start, same clock as ``directive.timestamp_ms``.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        session = self._get_session(session_id)
+        if end_ms <= start_ms:
+            end_ms = start_ms + int(CHUNK_SECONDS * 1000)
+        session.forwarded_transcripts.append(ForwardedTranscript(
+            text=text,
+            speaker_id=speaker_id or "unknown",
+            start_ms=int(start_ms),
+            end_ms=int(end_ms),
+        ))
 
     def update_modulation(
         self,
