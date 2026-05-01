@@ -58,7 +58,12 @@ async def _resolve_session_id(
     session_id: Optional[str],
     api_key_hash: Optional[str],
 ) -> Optional[str]:
-    """If session_id is missing but we have api_key_hash, create a session and return its id."""
+    """If session_id is missing but we have api_key_hash, create a session and return its id.
+
+    Falls back to a generated UUID when the org resolves but the DB session row can't be
+    created (e.g. ConversationSession table missing). This keeps the GCS archival path
+    (`_store_org_data`) working — it requires both api_key_hash and session_id.
+    """
     if session_id:
         return session_id
     if not api_key_hash:
@@ -67,7 +72,8 @@ async def _resolve_session_id(
     org_id = await loader.get_organization_id(api_key_hash)
     if not org_id:
         return None
-    return await create_session(org_id, metadata=None)
+    db_sid = await create_session(org_id, metadata=None)
+    return db_sid or str(uuid.uuid4())
 
 
 def _store_org_data(
