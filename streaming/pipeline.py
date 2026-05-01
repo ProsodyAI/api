@@ -117,7 +117,7 @@ def _smooth_emotion_probs(
 
 @dataclass
 class ForwardedTranscript:
-    """A transcript segment forwarded by the client (e.g. Aurelia's Deepgram STT).
+    """A transcript segment forwarded by the client from its own STT provider.
 
     When the client has its own STT, it can stream finalized segments here and
     they'll be attached to whichever 2 s prosody chunk their midpoint falls in,
@@ -563,8 +563,8 @@ class ProsodicPipeline:
         except Exception:
             pass
 
-        # Client-forwarded transcripts (e.g. Aurelia's Deepgram STT) override Whisper
-        # for any chunk whose 2 s window contains the transcript's midpoint.
+        # Client-forwarded transcripts (from the client's own STT) override
+        # Whisper for any chunk whose 2 s window contains the transcript's midpoint.
         chunk_idx = session.frames_processed  # current chunk, pre-increment
         chunk_start_ms = chunk_idx * CHUNK_SECONDS * 1000
         chunk_end_ms = chunk_start_ms + CHUNK_SECONDS * 1000
@@ -689,9 +689,9 @@ class ProsodicPipeline:
         """Buffer a client-forwarded transcript.
 
         It will be attached to whichever 2 s prosody chunk its midpoint falls in
-        (overriding Whisper for that chunk). Used by clients with their own STT
-        (e.g. Aurelia's Deepgram via LiveKit). Timestamps are ms relative to
-        session start, same clock as ``directive.timestamp_ms``.
+        (overriding Whisper for that chunk). Used by clients with their own STT.
+        Timestamps are ms relative to session start, same clock as
+        ``directive.timestamp_ms``.
         """
         text = (text or "").strip()
         if not text:

@@ -212,6 +212,19 @@ async def websocket_realtime(websocket: WebSocket):
                             await websocket.send_json({"type": "enroll_agent_ack", "ok": False, "error": str(e)})
                     continue
 
+                elif msg_type == "transcript":
+                    # Client-forwarded STT (from the client's own STT provider). Attached
+                    # to whichever prosody chunk the transcript's midpoint falls in;
+                    # overrides Whisper.
+                    pipeline.add_forwarded_transcript(
+                        session_id,
+                        text=msg.get("text", ""),
+                        speaker_id=msg.get("speaker_id", "unknown"),
+                        start_ms=int(msg.get("start_ms", 0) or 0),
+                        end_ms=int(msg.get("end_ms", 0) or 0),
+                    )
+                    continue
+
                 elif msg_type == "end":
                     _flush_to_gcs(org_slug, org_bucket, session_id, pipeline)
                     session = pipeline.get_session(session_id)
@@ -277,7 +290,7 @@ async def websocket_realtime(websocket: WebSocket):
                     "ipa_transcript": getattr(directive, "ipa_transcript", "") or "",
                     "prosody_embedding": getattr(directive, "prosody_embedding", None),
                     "sequence_signals": {k: round(v, 3) for k, v in directive.sequence_signals.items()} if directive.sequence_signals else {},
-                    # Flat fields for clients that read top-level (e.g. Aurelia ProsodyTracker)
+                    # Flat fields for clients that read top-level directive attributes
                     "current_emotion": directive.emotion,
                     "emotion_confidence": confidence,
                     "valence": valence,
@@ -298,7 +311,7 @@ async def websocket_realtime(websocket: WebSocket):
                     actions = [{"kpi": p.kpi_name, "action": a.action, "expected_impact": round(a.expected_impact, 3)} for p in preds for a in p.recommended_actions]
                     if actions:
                         response["recommended_actions"] = actions
-                    # Map KPI predictions to flat fields for Aurelia-style consumers
+                    # Map KPI predictions to flat top-level fields for client consumers
                     for p in preds:
                         name = (p.kpi_name or "").lower().replace(" ", "_")
                         if "escalation" in name:

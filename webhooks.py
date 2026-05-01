@@ -117,6 +117,13 @@ async def deliver_webhook(
     url = config.get("url", "").strip()
     if not url:
         return
+    if not (url.startswith("http://") or url.startswith("https://")):
+        # Stored URL is missing a scheme; httpx would raise on send. Surface a
+        # clear, actionable error in lastError instead of the cryptic httpx one.
+        msg = "Webhook URL must start with http:// or https://"
+        logger.warning("Webhook delivery skipped for session %s: %s", session_id, msg)
+        await _update_sync_status(org_id, error=msg)
+        return
 
     secret = config.get("secret", "")
     headers_extra: dict = config.get("headers") or {}
