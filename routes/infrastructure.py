@@ -176,7 +176,7 @@ async def get_metrics(hours: int = Query(24, ge=1, le=168)) -> dict[str, Any]:
 
     def _ts_seconds(t) -> int:
         """Handle both proto Timestamp and DatetimeWithNanoseconds."""
-        if hasattr(t, "seconds") and isinstance(getattr(t, "seconds"), int):
+        if hasattr(t, "seconds") and isinstance(t.seconds, int):
             return t.seconds
         if hasattr(t, "timestamp"):
             return int(t.timestamp())
