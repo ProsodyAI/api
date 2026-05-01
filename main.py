@@ -19,7 +19,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from middleware.auth import get_api_key_header
 from middleware.rate_limit import RateLimitMiddleware
-from routes import admin, analysis, features, feedback, health, sessions, streaming, training_runs
+from routes import (
+    activity,
+    admin,
+    analysis,
+    features,
+    feedback,
+    health,
+    infrastructure,
+    sessions,
+    streaming,
+    training_runs,
+)
 
 
 @asynccontextmanager
@@ -114,6 +125,16 @@ app.include_router(
     training_runs.router,
     prefix="/v1/admin",
     tags=["Training Runs"],
+)
+app.include_router(
+    infrastructure.router,
+    prefix="/v1/admin",
+    tags=["Infrastructure"],
+)
+app.include_router(
+    activity.router,
+    prefix="/v1/admin",
+    tags=["Activity"],
 )
 
 
