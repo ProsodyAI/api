@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import numpy as np
 from kpi_predictor import ProsodySignals
+from streaming.modulation import ModulationState, get_modulation_engine
 from streaming.speaker_utils import assign_speaker, get_embedding
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,8 @@ class PipelineSession:
     _speaker_centroids: Any = None  # list of (label, np.ndarray) for multi-speaker clustering
     # Previous transcript (used as Whisper prompt for continuity)
     last_transcript: str = ""
+    # Per-session agent-modulation state (lazy-initialized on first directive).
+    modulation_state: Optional[ModulationState] = None
 
 
 def _decode_mulaw(data: bytes) -> bytes:
@@ -565,6 +568,24 @@ class ProsodicPipeline:
         session = self._get_session(session_id)
         session.agent_embedding = emb
         return True
+
+    def update_modulation(
+        self,
+        session_id: str,
+        directive: AgentDirective,
+    ) -> tuple[dict, Optional[dict]]:
+        """Run the agent-modulation engine for a directive.
+
+        Returns ``(continuous_modulation, transition_event_or_none)``. Lazy-initializes
+        per-session modulation state on first call.
+        """
+        session = self._get_session(session_id)
+        if session.modulation_state is None:
+            session.modulation_state = ModulationState(
+                agent_enrolled=session.agent_embedding is not None,
+            )
+        engine = get_modulation_engine()
+        return engine.update(session.modulation_state, directive)
 
     def get_session(self, session_id: str) -> Optional[PipelineSession]:
         return self._sessions.get(session_id)

@@ -312,9 +312,21 @@ async def websocket_realtime(websocket: WebSocket):
                         elif "sentiment" in name:
                             response["sentiment_forecast"] = round(p.predicted_value, 3) if isinstance(p.predicted_value, (int, float)) else 0.0
 
+                # Agent-modulation: continuous TTS shaping + discrete steering events.
+                try:
+                    modulation, steering_event = pipeline.update_modulation(session_id, directive)
+                    response["agent_modulation"] = modulation
+                except Exception as exc:
+                    logger.warning(f"Session {session_id}: modulation update failed: {exc}")
+                    modulation, steering_event = None, None
+
                 safe_response = _json_safe(response)
                 await websocket.send_json(safe_response)
                 await _broadcast(session_id, safe_response)
+                if steering_event is not None:
+                    safe_event = _json_safe(steering_event)
+                    await websocket.send_json(safe_event)
+                    await _broadcast(session_id, safe_event)
 
     except WebSocketDisconnect:
         logger.info(f"Session {session_id} disconnected")
