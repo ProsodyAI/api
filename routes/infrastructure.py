@@ -174,15 +174,31 @@ async def get_metrics(hours: int = Query(24, ge=1, le=168)) -> dict[str, Any]:
         f'AND resource.labels.location = "{REGION}"'
     )
 
+    def _ts_seconds(t) -> int:
+        """Handle both proto Timestamp and DatetimeWithNanoseconds."""
+        if hasattr(t, "seconds") and isinstance(getattr(t, "seconds"), int):
+            return t.seconds
+        if hasattr(t, "timestamp"):
+            return int(t.timestamp())
+        return 0
+
+    def _point_value(p):
+        v = p.value
+        # Prefer distribution mean, then double, then int
+        if v.HasField("distribution_value") if hasattr(v, "HasField") else False:
+            dist = v.distribution_value
+            return dist.mean if dist.count > 0 else 0.0
+        if v.double_value:
+            return v.double_value
+        if v.int64_value:
+            return v.int64_value
+        return 0.0
+
     def _series(points):
         return [
             {
-                "t": p.interval.end_time.seconds,
-                "v": (
-                    p.value.double_value
-                    if p.value.double_value is not None
-                    else p.value.int64_value
-                ),
+                "t": _ts_seconds(p.interval.end_time),
+                "v": _point_value(p),
             }
             for p in reversed(list(points))
         ]
@@ -388,11 +404,31 @@ async def list_logs(
     try:
         entries = []
         for entry in client.list_entries(filter_=filter_str, order_by=cloud_logging.DESCENDING, max_results=limit):
-            payload = entry.payload
-            if isinstance(payload, dict):
-                text = payload.get("message") or payload.get("msg") or str(payload)[:500]
-            else:
-                text = str(payload)[:500] if payload else ""
+            # Extract textual payload — could be text, struct, or proto
+            text = ""
+            payload = getattr(entry, "payload", None)
+            if isinstance(payload, str):
+                text = payload
+            elif isinstance(payload, dict):
+                text = (
+                    payload.get("message")
+                    or payload.get("msg")
+                    or payload.get("text")
+                    or str(payload)
+                )
+            elif payload is not None:
+                text = str(payload)
+
+            # Fallback to text_payload/json_payload attrs on the entry itself
+            if not text:
+                text = (
+                    getattr(entry, "text_payload", "")
+                    or str(getattr(entry, "json_payload", "") or "")
+                    or str(getattr(entry, "proto_payload", "") or "")
+                )
+
+            text = (text or "")[:1000]
+
             entries.append({
                 "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
                 "severity": entry.severity or "DEFAULT",
