@@ -109,6 +109,16 @@ def _flush_to_gcs(org_slug, org_bucket, session_id, pipeline):
             "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3) if history else 0,
             "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3) if history else 0,
         }
+        diag = pipeline.get_silence_diagnostic(session_id)
+        if diag is not None:
+            transcript["silence_diagnostic"] = diag
+            if diag.get("audio_silent"):
+                logger.warning(
+                    "Session %s (%s): client streamed audio bytes but every sample "
+                    "was zero (bytes=%d, chunks=%d). Aurelia/client integration is "
+                    "not feeding real audio into the WS.",
+                    session_id, org_slug, diag["bytes_received"], diag["chunks_received"],
+                )
 
         upload_transcript(org_slug, session_id, transcript, org_storage_bucket=org_bucket)
         logger.info(f"Session {session_id}: flushed to GCS ({org_slug})")
@@ -237,12 +247,16 @@ async def websocket_realtime(websocket: WebSocket):
                         "avg_arousal": round(sum(s.arousal for s in history) / len(history), 3),
                         "avg_dominance": round(sum(s.dominance for s in history) / len(history), 3),
                     } if history else None
-                    await websocket.send_json({
+                    diag = pipeline.get_silence_diagnostic(session_id)
+                    end_payload = {
                         "type": "session_end",
                         "session_id": session_id,
                         "frames_processed": session.frames_processed if session else 0,
                         "transcript": transcript,
-                    })
+                    }
+                    if diag is not None:
+                        end_payload["diagnostic"] = diag
+                    await websocket.send_json(end_payload)
                     if org_id:
                         asyncio.ensure_future(deliver_webhook(org_id, session_id, transcript, prosody_summary=prosody_summary))
                     break
@@ -256,6 +270,23 @@ async def websocket_realtime(websocket: WebSocket):
                 except Exception as exc:
                     logger.error(f"Session {session_id}: process_audio crashed: {exc}", exc_info=True)
                     continue
+
+                # If the client is streaming bytes but every sample is zero,
+                # surface that immediately. Aurelia / generic LiveKit clients
+                # have shipped this failure mode (audio capture not wired
+                # into the WS send) silently for days, accumulating empty
+                # sessions in GCS. Emit once per session.
+                warning = pipeline.should_emit_silence_warning(session_id)
+                if warning is not None:
+                    logger.warning(
+                        "Session %s: emitting audio_silent warning (%d chunks all zero)",
+                        session_id, warning.get("diagnostic", {}).get("chunks_all_zero", 0),
+                    )
+                    try:
+                        await websocket.send_json(warning)
+                    except Exception:
+                        pass
+
                 if directive is None:
                     continue
 

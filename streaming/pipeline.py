@@ -145,6 +145,17 @@ class PipelineSession:
     # Audio format config (set from WebSocket config message)
     input_sample_rate: int = 16000
     input_encoding: str = "pcm16"  # "pcm16" | "mulaw" | "alaw"
+    # Diagnostic counters surfaced on session_end and via GCS history. These
+    # exist specifically to catch "the client connected but never sent real
+    # audio" failure modes (zero-buffers from a misconfigured tap, silence-
+    # only streams, etc.) — symptoms that would otherwise look like "0 frames
+    # processed" with no obvious cause.
+    bytes_received: int = 0
+    samples_nonzero: int = 0
+    chunks_received: int = 0
+    chunks_all_zero: int = 0
+    chunks_gated_silent: int = 0
+    silence_warning_sent: bool = False
     # Temporal smoothing state (EMA of last output)
     _smooth_valence: Optional[float] = None
     _smooth_arousal: Optional[float] = None
@@ -475,6 +486,20 @@ class ProsodicPipeline:
         """
         session = self._get_session(session_id)
 
+        # Update bytes-received counters BEFORE preprocessing so they reflect
+        # what the client actually sent.
+        session.bytes_received += len(pcm_data)
+        if pcm_data:
+            session.chunks_received += 1
+            try:
+                if not any(pcm_data):
+                    session.chunks_all_zero += 1
+                else:
+                    nonzero = int(np.count_nonzero(np.frombuffer(pcm_data, dtype=np.int16)))
+                    session.samples_nonzero += nonzero
+            except Exception:
+                pass
+
         needs_preprocessing = (
             session.input_sample_rate != TARGET_SAMPLE_RATE
             or session.input_encoding != "pcm16"
@@ -494,9 +519,10 @@ class ProsodicPipeline:
         # Voice-activity gate on the RAW chunk. If we normalized first, room
         # tone gets amplified to look loud and Whisper hallucinates boilerplate
         # (PewDiePie, "thank you for watching", subscribe-spam) on silence.
-        if _peak(raw_chunk) < VAD_RAW_PEAK_THRESHOLD:
-            return None
-        if _rms(raw_chunk) < VAD_RAW_RMS_THRESHOLD:
+        chunk_peak = _peak(raw_chunk)
+        chunk_rms = _rms(raw_chunk)
+        if chunk_peak < VAD_RAW_PEAK_THRESHOLD or chunk_rms < VAD_RAW_RMS_THRESHOLD:
+            session.chunks_gated_silent += 1
             return None
 
         # Only normalize voiced chunks for downstream model + Whisper.
@@ -726,6 +752,65 @@ class ProsodicPipeline:
 
     def get_session(self, session_id: str) -> Optional[PipelineSession]:
         return self._sessions.get(session_id)
+
+    def get_silence_diagnostic(self, session_id: str) -> Optional[dict]:
+        """Snapshot the per-session silence/zero-stream counters.
+
+        Returned dict is JSON-safe and intended for inclusion on session_end
+        payloads + the GCS history transcript. Returns ``None`` when there is
+        no session yet (lazy init has not run).
+        """
+        s = self._sessions.get(session_id)
+        if s is None:
+            return None
+        return {
+            "bytes_received": s.bytes_received,
+            "chunks_received": s.chunks_received,
+            "chunks_all_zero": s.chunks_all_zero,
+            "chunks_gated_silent": s.chunks_gated_silent,
+            "samples_nonzero": s.samples_nonzero,
+            "frames_processed": s.frames_processed,
+            "audio_silent": (
+                s.bytes_received > 0
+                and s.samples_nonzero == 0
+            ),
+            "input_sample_rate": s.input_sample_rate,
+            "input_encoding": s.input_encoding,
+        }
+
+    def should_emit_silence_warning(self, session_id: str) -> Optional[dict]:
+        """Return a payload to send the client when a stream looks broken.
+
+        Triggers when at least 2 chunks have been received and ALL of them
+        contained nothing but zeros (typical of "audio capture not connected
+        to the WS send" — Aurelia's exact failure mode in May 2026 prod).
+        Returns ``None`` if no warning is warranted yet, or if one was
+        already sent for this session.
+        """
+        s = self._sessions.get(session_id)
+        if s is None or s.silence_warning_sent:
+            return None
+        if s.chunks_received >= 2 and s.chunks_received == s.chunks_all_zero:
+            s.silence_warning_sent = True
+            return {
+                "type": "warning",
+                "code": "audio_silent",
+                "message": (
+                    "ProsodyAI received audio bytes but every sample was zero. "
+                    "The audio capture in your client likely is not wired into "
+                    "the WebSocket send. Check that the microphone / call audio "
+                    "is connected before sending bytes; verify sample_rate and "
+                    "encoding in your config message match the actual stream."
+                ),
+                "diagnostic": {
+                    "chunks_received": s.chunks_received,
+                    "chunks_all_zero": s.chunks_all_zero,
+                    "samples_nonzero": s.samples_nonzero,
+                    "input_sample_rate": s.input_sample_rate,
+                    "input_encoding": s.input_encoding,
+                },
+            }
+        return None
 
     def get_prosody_history(self, session_id: str) -> list[ProsodySignals]:
         session = self._sessions.get(session_id)
